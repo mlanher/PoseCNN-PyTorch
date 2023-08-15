@@ -5,23 +5,21 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
-import math
-import sys
-import copy
-from torch.nn.init import kaiming_normal_
+from fcn.config import cfg
 from layers.hard_label import HardLabel
 from layers.hough_voting import HoughVoting
-from layers.roi_pooling import RoIPool
 from layers.point_matching_loss import PMLoss
-from layers.roi_target_layer import roi_target_layer
 from layers.pose_target_layer import pose_target_layer
-from fcn.config import cfg
+from layers.roi_pooling import RoIPool
+from layers.roi_target_layer import roi_target_layer
+from torch.nn.init import kaiming_normal_
 
 __all__ = [
     'posecnn_rot_diffusion',
 ]
 
 vgg16 = models.vgg16(pretrained=False)
+
 
 def log_softmax_high_dimension(input):
     num_classes = input.size()[1]
@@ -53,13 +51,16 @@ def softmax_high_dimension(input):
         output = torch.div(e, s.repeat(1, num_classes))
     return output
 
+
 def conv(in_planes, out_planes, kernel_size=3, stride=1, relu=True):
     if relu:
         return nn.Sequential(
-            nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=(kernel_size-1)//2, bias=True),
+            nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=(kernel_size - 1) // 2,
+                      bias=True),
             nn.ReLU(inplace=True))
     else:
-        return nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=(kernel_size-1)//2, bias=True)
+        return nn.Conv2d(in_planes, out_planes, kernel_size=kernel_size, stride=stride, padding=(kernel_size - 1) // 2,
+                         bias=True)
 
 
 def fc(in_planes, out_planes, relu=True):
@@ -83,7 +84,7 @@ class PoseCNNRotDiffusion(nn.Module):
 
         # conv features
         features = list(vgg16.features)[:30]
-        
+
         # change the first conv layer for RGBD
         if cfg.INPUT == 'RGBD':
             conv0 = conv(6, 64, kernel_size=3, relu=False)
@@ -96,11 +97,11 @@ class PoseCNNRotDiffusion(nn.Module):
         self.classifier = vgg16.classifier[:-1]
         if cfg.TRAIN.SLIM:
             dim_fc = 256
-            self.classifier[0] = nn.Linear(512*7*7, 256)
+            self.classifier[0] = nn.Linear(512 * 7 * 7, 256)
             self.classifier[3] = nn.Linear(256, 256)
         else:
             dim_fc = 4096
-            
+
         print(self.features)
         print(self.classifier)
 
@@ -116,16 +117,17 @@ class PoseCNNRotDiffusion(nn.Module):
         self.upsample_conv5_embed = upsample(2.0)
         self.upsample_embed = upsample(8.0)
         self.conv_score = conv(num_units, num_classes, kernel_size=1)
-        self.hard_label = HardLabel(threshold=cfg.TRAIN.HARD_LABEL_THRESHOLD, sample_percentage=cfg.TRAIN.HARD_LABEL_SAMPLING)
+        self.hard_label = HardLabel(threshold=cfg.TRAIN.HARD_LABEL_THRESHOLD,
+                                    sample_percentage=cfg.TRAIN.HARD_LABEL_SAMPLING)
         self.dropout = nn.Dropout()
 
         if cfg.TRAIN.VERTEX_REG:
             # center regression branch
-            self.conv4_vertex_embed = conv(512, 2*num_units, kernel_size=1, relu=False)
-            self.conv5_vertex_embed = conv(512, 2*num_units, kernel_size=1, relu=False)
+            self.conv4_vertex_embed = conv(512, 2 * num_units, kernel_size=1, relu=False)
+            self.conv5_vertex_embed = conv(512, 2 * num_units, kernel_size=1, relu=False)
             self.upsample_conv5_vertex_embed = upsample(2.0)
             self.upsample_vertex_embed = upsample(8.0)
-            self.conv_vertex_score = conv(2*num_units, 3*num_classes, kernel_size=1, relu=False)
+            self.conv_vertex_score = conv(2 * num_units, 3 * num_classes, kernel_size=1, relu=False)
             # hough voting
             self.hough_voting = HoughVoting(is_train=0, skip_pixels=10, label_threshold=100, \
                                             inlier_threshold=0.9, voting_threshold=-1, per_threshold=0.01)
@@ -147,7 +149,6 @@ class PoseCNNRotDiffusion(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
-
 
     def forward(self, x, label_gt, meta_data, extents, gt_boxes, poses, points, symmetry):
 
@@ -194,6 +195,8 @@ class PoseCNNRotDiffusion(nn.Module):
                 self.hough_voting.skip_pixels = cfg.TEST.HOUGH_SKIP_PIXELS
                 self.hough_voting.inlier_threshold = cfg.TEST.HOUGH_INLIER_THRESHOLD
             out_box, out_pose = self.hough_voting(out_label, out_vertex, meta_data, extents)
+            print("--- OUTPOSE ---")
+            print(out_pose.size())
 
             # bounding box classification and regression branch
             bbox_labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = roi_target_layer(out_box, gt_boxes)
@@ -209,8 +212,9 @@ class PoseCNNRotDiffusion(nn.Module):
             bbox_pred = self.fc9(out_fc7)
 
             # rotation regression branch
-            rois, poses_target, poses_weight = pose_target_layer(out_box, bbox_prob, bbox_pred, gt_boxes, poses, self.training)
-            if cfg.TRAIN.POSE_REG:    
+            rois, poses_target, poses_weight = pose_target_layer(out_box, bbox_prob, bbox_pred, gt_boxes, poses,
+                                                                 self.training)
+            if cfg.TRAIN.POSE_REG:
                 out_qt_conv4 = self.roi_pool_conv4(out_conv4_3, rois)
                 out_qt_conv5 = self.roi_pool_conv5(out_conv5_3, rois)
                 out_qt = out_qt_conv4 + out_qt_conv5
@@ -219,10 +223,44 @@ class PoseCNNRotDiffusion(nn.Module):
                 out_quaternion = self.fc10(out_qt_fc7)
                 # point matching loss
                 poses_pred = nn.functional.normalize(torch.mul(out_quaternion, poses_weight))
-                print("---")
-                print("Poses pred: ", poses_pred)
-                print("Poses target: ", poses_target)
-                print("---")
+
+                def update_values(filename, new_values, mode="max"):
+                    # Check if file is empty or doesn't exist
+                    try:
+                        with open(filename, 'r') as file:
+                            content = file.read()
+                            if not content:
+                                saved_values = []
+                            else:
+                                saved_values = list(map(float, content.split(',')))
+                    except FileNotFoundError:
+                        saved_values = []
+
+                    # If saved_values is empty, directly write new_values to the file
+                    if not saved_values:
+                        with open(filename, 'w') as file:
+                            file.write(','.join(map(str, new_values)))
+                        return
+
+                    # Compare and update max values
+                    if mode == "max":
+                        values = [str(max(a, b)) for a, b in zip(saved_values, new_values)]
+                    elif mode == "min":
+                        values = [str(min(a, b)) for a, b in zip(saved_values, new_values)]
+
+                    # Write the max values back to the file
+                    with open(filename, 'w') as file:
+                        file.write(','.join(values))
+
+                fname_min = "target_poses_min.txt"
+                fname_max = "target_poses_max.txt"
+                poses_target_reshaped = poses_target.view(poses_target.size(0), -1, 4)
+                max_values_list = torch.max(poses_target_reshaped, dim=1).values.max(dim=0).values.tolist()
+                min_values_list = torch.min(poses_target_reshaped, dim=1).values.min(dim=0).values.tolist()
+                update_values(fname_max, max_values_list, mode="max")
+                update_values(fname_min, min_values_list, mode="min")
+
+
                 if self.training:
                     loss_pose = self.pml(poses_pred, poses_target, poses_weight, points, symmetry)
 
@@ -230,10 +268,10 @@ class PoseCNNRotDiffusion(nn.Module):
             if cfg.TRAIN.VERTEX_REG:
                 if cfg.TRAIN.POSE_REG:
                     return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, \
-                           bbox_pred, bbox_targets, bbox_inside_weights, loss_pose, poses_weight
+                        bbox_pred, bbox_targets, bbox_inside_weights, loss_pose, poses_weight
                 else:
                     return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, \
-                           bbox_pred, bbox_targets, bbox_inside_weights
+                        bbox_pred, bbox_targets, bbox_inside_weights
             else:
                 return out_logsoftmax, out_weight
         else:
@@ -253,7 +291,6 @@ class PoseCNNRotDiffusion(nn.Module):
 
 
 def posecnn_rot_diffusion(num_classes, num_units, data=None):
-
     model = PoseCNNRotDiffusion(num_classes, num_units)
 
     if data is not None:
@@ -276,7 +313,7 @@ def posecnn_rot_diffusion(num_classes, num_units, data=None):
         for k, v in pretrained_dict.items():
             print(k)
         print('=================================================')
-        model_dict.update(pretrained_dict) 
+        model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
 
     return model
