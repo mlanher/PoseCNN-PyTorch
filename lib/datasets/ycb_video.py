@@ -2,19 +2,19 @@
 # This work is licensed under the NVIDIA Source Code License - Non-commercial. Full
 # text can be found in LICENSE.md
 
+import copy
+import glob
+import math
+import os
+import os.path as osp
+
+import cv2
+import numpy as np
+import numpy.random as npr
+import scipy.io
 import torch
 import torch.utils.data as data
 
-import os, math
-import sys
-import os.path as osp
-from os.path import *
-import numpy as np
-import numpy.random as npr
-import cv2
-import scipy.io
-import copy
-import glob
 try:
     import cPickle  # Use cPickle on Python 2.7
 except ImportError:
@@ -22,7 +22,7 @@ except ImportError:
 
 import datasets
 from fcn.config import cfg
-from utils.blob import pad_im, chromatic_transform, add_noise, add_noise_cuda
+from utils.blob import pad_im, chromatic_transform, add_noise
 from transforms3d.quaternions import mat2quat, quat2mat
 from utils.se3 import *
 from utils.pose_error import *
@@ -30,12 +30,12 @@ from utils.cython_bbox import bbox_overlaps
 
 
 class YCBVideo(data.Dataset, datasets.imdb):
-    def __init__(self, image_set, ycb_video_path = None):
+    def __init__(self, image_set, ycb_video_path=None):
 
         self._name = 'ycb_video_' + image_set
         self._image_set = image_set
         self._ycb_video_path = self._get_default_path() if ycb_video_path is None \
-                            else ycb_video_path
+            else ycb_video_path
 
         path = os.path.join(self._ycb_video_path, 'data')
         if not os.path.exists(path):
@@ -45,23 +45,29 @@ class YCBVideo(data.Dataset, datasets.imdb):
         self._model_path = os.path.join(datasets.ROOT_DIR, 'data', 'models')
 
         # define all the classes
-        self._classes_all = ('__background__', '002_master_chef_can', '003_cracker_box', '004_sugar_box', '005_tomato_soup_can', '006_mustard_bottle', \
-                         '007_tuna_fish_can', '008_pudding_box', '009_gelatin_box', '010_potted_meat_can', '011_banana', '019_pitcher_base', \
-                         '021_bleach_cleanser', '024_bowl', '025_mug', '035_power_drill', '036_wood_block', '037_scissors', '040_large_marker', \
-                         '051_large_clamp', '052_extra_large_clamp', '061_foam_brick')
+        self._classes_all = (
+        '__background__', '002_master_chef_can', '003_cracker_box', '004_sugar_box', '005_tomato_soup_can',
+        '006_mustard_bottle', \
+        '007_tuna_fish_can', '008_pudding_box', '009_gelatin_box', '010_potted_meat_can', '011_banana',
+        '019_pitcher_base', \
+        '021_bleach_cleanser', '024_bowl', '025_mug', '035_power_drill', '036_wood_block', '037_scissors',
+        '040_large_marker', \
+        '051_large_clamp', '052_extra_large_clamp', '061_foam_brick')
         self._num_classes_all = len(self._classes_all)
-        self._class_colors_all = [(255, 255, 255), (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255), \
-                              (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0), (128, 0, 128), (0, 128, 128), \
-                              (64, 0, 0), (0, 64, 0), (0, 0, 64), (64, 64, 0), (64, 0, 64), (0, 64, 64), 
-                              (192, 0, 0), (0, 192, 0), (0, 0, 192)]
-        self._symmetry_all = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]).astype(np.float32)
+        self._class_colors_all = [(255, 255, 255), (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255),
+                                  (0, 255, 255), \
+                                  (128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 0), (128, 0, 128), (0, 128, 128), \
+                                  (64, 0, 0), (0, 64, 0), (0, 0, 64), (64, 64, 0), (64, 0, 64), (0, 64, 64),
+                                  (192, 0, 0), (0, 192, 0), (0, 0, 192)]
+        self._symmetry_all = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]).astype(
+            np.float32)
         self._extents_all = self._load_object_extents()
 
         self._width = 640
         self._height = 480
         self._intrinsic_matrix = np.array([[1.066778e+03, 0.000000e+00, 3.129869e+02],
-                                          [0.000000e+00, 1.067487e+03, 2.413109e+02],
-                                          [0.000000e+00, 0.000000e+00, 1.000000e+00]])
+                                           [0.000000e+00, 1.067487e+03, 2.413109e+02],
+                                           [0.000000e+00, 0.000000e+00, 1.000000e+00]])
 
         # select a subset of classes
         self._classes = [self._classes_all[i] for i in cfg.TRAIN.CLASSES]
@@ -83,14 +89,20 @@ class YCBVideo(data.Dataset, datasets.imdb):
             self._load_object_points(self._classes_test, self._extents_test, self._symmetry_test)
 
         # 3D model paths
-        self.model_mesh_paths = ['{}/{}/textured_simple.obj'.format(self._model_path, cls) for cls in self._classes_all[1:]]
-        self.model_sdf_paths = ['{}/{}/textured_simple_low_res.pth'.format(self._model_path, cls) for cls in self._classes_all[1:]]
-        self.model_texture_paths = ['{}/{}/texture_map.png'.format(self._model_path, cls) for cls in self._classes_all[1:]]
+        self.model_mesh_paths = ['{}/{}/textured_simple.obj'.format(self._model_path, cls) for cls in
+                                 self._classes_all[1:]]
+        self.model_sdf_paths = ['{}/{}/textured_simple_low_res.pth'.format(self._model_path, cls) for cls in
+                                self._classes_all[1:]]
+        self.model_texture_paths = ['{}/{}/texture_map.png'.format(self._model_path, cls) for cls in
+                                    self._classes_all[1:]]
         self.model_colors = [np.array(self._class_colors_all[i]) / 255.0 for i in range(1, len(self._classes_all))]
 
-        self.model_mesh_paths_target = ['{}/{}/textured_simple.obj'.format(self._model_path, cls) for cls in self._classes[1:]]
-        self.model_sdf_paths_target = ['{}/{}/textured_simple.sdf'.format(self._model_path, cls) for cls in self._classes[1:]]
-        self.model_texture_paths_target = ['{}/{}/texture_map.png'.format(self._model_path, cls) for cls in self._classes[1:]]
+        self.model_mesh_paths_target = ['{}/{}/textured_simple.obj'.format(self._model_path, cls) for cls in
+                                        self._classes[1:]]
+        self.model_sdf_paths_target = ['{}/{}/textured_simple.sdf'.format(self._model_path, cls) for cls in
+                                       self._classes[1:]]
+        self.model_texture_paths_target = ['{}/{}/texture_map.png'.format(self._model_path, cls) for cls in
+                                           self._classes[1:]]
         self.model_colors_target = [np.array(self._class_colors_all[i]) / 255.0 for i in cfg.TRAIN.CLASSES[1:]]
 
         self._class_to_ind = dict(zip(self._classes, range(self._num_classes)))
@@ -102,10 +114,9 @@ class YCBVideo(data.Dataset, datasets.imdb):
         self._roidb = self.gt_roidb()
 
         assert os.path.exists(self._ycb_video_path), \
-                'ycb_video path does not exist: {}'.format(self._ycb_video_path)
+            'ycb_video path does not exist: {}'.format(self._ycb_video_path)
         assert os.path.exists(self._data_path), \
-                'Data path does not exist: {}'.format(self._data_path)
-
+            'Data path does not exist: {}'.format(self._data_path)
 
     def __getitem__(self, index):
 
@@ -143,14 +154,13 @@ class YCBVideo(data.Dataset, datasets.imdb):
 
         return sample
 
-
-    def _get_image_blob(self, roidb, scale_ind):    
+    def _get_image_blob(self, roidb, scale_ind):
 
         # rgba
         rgba = pad_im(cv2.imread(roidb['image'], cv2.IMREAD_UNCHANGED), 16)
         if rgba.shape[2] == 4:
-            im = np.copy(rgba[:,:,:3])
-            alpha = rgba[:,:,3]
+            im = np.copy(rgba[:, :, :3])
+            alpha = rgba[:, :, 3]
             I = np.where(alpha == 0)
             im[I[0], I[1], :] = 0
         else:
@@ -181,7 +191,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
         im_depth = im_depth.astype('float') / 10000.0
 
         return image_blob, im_depth, im_scale, height, width
-
 
     def _get_label_blob(self, roidb, num_classes, im_scale, height, width):
         """ build the label blob """
@@ -236,22 +245,22 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 # egocentric to allocentric
                 qt_allocentric = egocentric2allocentric(qt, T)
                 if qt_allocentric[0] < 0:
-                   qt_allocentric = -1 * qt_allocentric
+                    qt_allocentric = -1 * qt_allocentric
                 pose_blob[count, 2:6] = qt_allocentric
                 pose_blob[count, 6:] = T
 
                 # compute box
                 x3d = np.ones((4, self._points_all.shape[1]), dtype=np.float32)
-                x3d[0, :] = self._points_all[ind,:,0]
-                x3d[1, :] = self._points_all[ind,:,1]
-                x3d[2, :] = self._points_all[ind,:,2]
+                x3d[0, :] = self._points_all[ind, :, 0]
+                x3d[1, :] = self._points_all[ind, :, 1]
+                x3d[2, :] = self._points_all[ind, :, 2]
                 RT = np.zeros((3, 4), dtype=np.float32)
                 RT[:3, :3] = quat2mat(qt)
                 RT[:, 3] = T
                 x2d = np.matmul(meta_data['intrinsic_matrix'], np.matmul(RT, x3d))
                 x2d[0, :] = np.divide(x2d[0, :], x2d[2, :])
                 x2d[1, :] = np.divide(x2d[1, :], x2d[2, :])
-        
+
                 gt_boxes[count, 0] = np.min(x2d[0, :]) * im_scale
                 gt_boxes[count, 1] = np.min(x2d[1, :]) * im_scale
                 gt_boxes[count, 2] = np.max(x2d[0, :]) * im_scale
@@ -278,13 +287,13 @@ class YCBVideo(data.Dataset, datasets.imdb):
             if roidb['flipped']:
                 center[:, 0] = width - center[:, 0]
             vertex_targets, vertex_weights = self._generate_vertex_targets(im_label,
-                meta_data['cls_indexes'], center, poses, classes, num_classes)
+                                                                           meta_data['cls_indexes'], center, poses,
+                                                                           classes, num_classes)
         else:
             vertex_targets = []
             vertex_weights = []
 
         return label_blob, mask, meta_data_blob, pose_blob, gt_boxes, vertex_targets, vertex_weights
-
 
     # compute the voting label image in 2D
     def _generate_vertex_targets(self, im_label, cls_indexes, center, poses, classes, num_classes):
@@ -313,22 +322,20 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 # compute the norm
                 N = np.linalg.norm(R, axis=0) + 1e-10
                 # normalization
-                R = np.divide(R, np.tile(N, (2,1)))
+                R = np.divide(R, np.tile(N, (2, 1)))
                 # assignment
-                vertex_targets[3*i+0, y, x] = R[0,:]
-                vertex_targets[3*i+1, y, x] = R[1,:]
-                vertex_targets[3*i+2, y, x] = math.log(z)
+                vertex_targets[3 * i + 0, y, x] = R[0, :]
+                vertex_targets[3 * i + 1, y, x] = R[1, :]
+                vertex_targets[3 * i + 2, y, x] = math.log(z)
 
-                vertex_weights[3*i+0, y, x] = cfg.TRAIN.VERTEX_W_INSIDE
-                vertex_weights[3*i+1, y, x] = cfg.TRAIN.VERTEX_W_INSIDE
-                vertex_weights[3*i+2, y, x] = cfg.TRAIN.VERTEX_W_INSIDE
+                vertex_weights[3 * i + 0, y, x] = cfg.TRAIN.VERTEX_W_INSIDE
+                vertex_weights[3 * i + 1, y, x] = cfg.TRAIN.VERTEX_W_INSIDE
+                vertex_weights[3 * i + 2, y, x] = cfg.TRAIN.VERTEX_W_INSIDE
 
         return vertex_targets, vertex_weights
 
-
     def __len__(self):
         return self._size
-
 
     def _get_default_path(self):
         """
@@ -336,19 +343,18 @@ class YCBVideo(data.Dataset, datasets.imdb):
         """
         return os.path.join(datasets.ROOT_DIR, 'data', 'YCB_Video')
 
-
     def _load_image_set_index(self, image_set):
         """
         Load the indexes listed in this dataset's image set file.
         """
         image_set_file = os.path.join(self._ycb_video_path, image_set + '.txt')
         assert os.path.exists(image_set_file), \
-                'Path does not exist: {}'.format(image_set_file)
+            'Path does not exist: {}'.format(image_set_file)
 
         image_index = []
         video_ids_selected = set([])
         video_ids_not = set([])
-        count = np.zeros((self.num_classes, ), dtype=np.int32)
+        count = np.zeros((self.num_classes,), dtype=np.int32)
 
         with open(image_set_file) as f:
             for x in f.readlines():
@@ -392,7 +398,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
 
         return image_index
 
-
     def _load_object_points(self, classes, extents, symmetry):
 
         points = [[] for _ in range(len(classes))]
@@ -424,7 +429,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
 
         return points, points_all, point_blob
 
-
     def _load_object_extents(self):
 
         extents = np.zeros((self._num_classes_all, 3), dtype=np.float32)
@@ -436,7 +440,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
             extents[i, :] = 2 * np.max(np.absolute(points), axis=0)
 
         return extents
-
 
     # image
     def image_path_at(self, i):
@@ -455,7 +458,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
             image_path = os.path.join(self._data_path, index + '-color.png')
 
         assert os.path.exists(image_path), \
-                'Path does not exist: {}'.format(image_path)
+            'Path does not exist: {}'.format(image_path)
         return image_path
 
     # depth
@@ -471,7 +474,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
         """
         depth_path = os.path.join(self._data_path, index + '-depth.png')
         assert os.path.exists(depth_path), \
-                'Path does not exist: {}'.format(depth_path)
+            'Path does not exist: {}'.format(depth_path)
         return depth_path
 
     # label
@@ -487,7 +490,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
         """
         label_path = os.path.join(self._data_path, index + '-label.png')
         assert os.path.exists(label_path), \
-                'Path does not exist: {}'.format(label_path)
+            'Path does not exist: {}'.format(label_path)
         return label_path
 
     # camera pose
@@ -503,7 +506,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
         """
         metadata_path = os.path.join(self._data_path, index + '-meta.mat')
         assert os.path.exists(metadata_path), \
-                'Path does not exist: {}'.format(metadata_path)
+            'Path does not exist: {}'.format(metadata_path)
         return metadata_path
 
     def gt_roidb(self):
@@ -533,7 +536,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
 
         return gt_roidb
 
-
     def _load_ycb_video_annotation(self, index):
         """
         Load class name and meta data
@@ -560,8 +562,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
             # parse image name
             pos = index.find('/')
             video_id = index[:pos]
-            image_id = index[pos+1:]
-        
+            image_id = index[pos + 1:]
+
         return {'image': image_path,
                 'depth': depth_path,
                 'label': label_path,
@@ -570,7 +572,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 'image_id': image_id,
                 'is_syn': is_syn,
                 'flipped': False}
-
 
     def labels_to_image(self, labels):
 
@@ -583,7 +584,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
 
         return im_label
 
-
     def process_label_image(self, label_image):
         """
         change label image to label index
@@ -594,10 +594,10 @@ class YCBVideo(data.Dataset, datasets.imdb):
         labels_all = np.zeros((height, width), dtype=np.int32)
 
         # label image is in BGR order
-        index = label_image[:,:,2] + 256*label_image[:,:,1] + 256*256*label_image[:,:,0]
+        index = label_image[:, :, 2] + 256 * label_image[:, :, 1] + 256 * 256 * label_image[:, :, 0]
         for i in range(1, len(self._class_colors_all)):
             color = self._class_colors_all[i]
-            ind = color[0] + 256*color[1] + 256*256*color[2]
+            ind = color[0] + 256 * color[1] + 256 * 256 * color[2]
             I = np.where(index == ind)
             labels_all[I[0], I[1]] = i
 
@@ -606,7 +606,6 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 labels[I[0], I[1]] = ind
 
         return labels, labels_all
-
 
     def evaluation(self, output_dir):
 
@@ -631,27 +630,27 @@ class YCBVideo(data.Dataset, datasets.imdb):
             distances_non = np.zeros((num_max, num_results), dtype=np.float32)
             errors_rotation = np.zeros((num_max, num_results), dtype=np.float32)
             errors_translation = np.zeros((num_max, num_results), dtype=np.float32)
-            results_seq_id = np.zeros((num_max, ), dtype=np.float32)
-            results_frame_id = np.zeros((num_max, ), dtype=np.float32)
-            results_object_id = np.zeros((num_max, ), dtype=np.float32)
-            results_cls_id = np.zeros((num_max, ), dtype=np.float32)
+            results_seq_id = np.zeros((num_max,), dtype=np.float32)
+            results_frame_id = np.zeros((num_max,), dtype=np.float32)
+            results_object_id = np.zeros((num_max,), dtype=np.float32)
+            results_cls_id = np.zeros((num_max,), dtype=np.float32)
 
             # for each image
             count = -1
             for i in range(len(self._roidb)):
-    
+
                 # parse keyframe name
                 seq_id = int(self._roidb[i]['video_id'])
                 frame_id = int(self._roidb[i]['image_id'])
 
                 # load result
                 filename = os.path.join(output_dir, '%04d_%06d.mat' % (seq_id, frame_id))
-                print(filename)
+                print("Loading result: ", filename)
                 result_posecnn = scipy.io.loadmat(filename)
 
                 # load gt poses
                 filename = osp.join(self._data_path, '%04d/%06d-meta.mat' % (seq_id, frame_id))
-                print(filename)
+                print("Loading gt: ", filename)
                 gt = scipy.io.loadmat(filename)
 
                 # for each gt poses
@@ -669,7 +668,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
                     # network result
                     result = result_posecnn
                     roi_index = []
-                    if len(result['rois']) > 0:     
+                    if len(result['rois']) > 0:
                         for k in range(result['rois'].shape[0]):
                             ind = int(result['rois'][k, 1])
                             if ind == -1:
@@ -677,7 +676,25 @@ class YCBVideo(data.Dataset, datasets.imdb):
                             else:
                                 cls = cfg.TRAIN.CLASSES[ind]
                             if cls == cls_index:
-                                roi_index.append(k)                   
+                                roi_index.append(k)
+
+                    """ This is a temporary fix as mat file gt has no key 'box' """
+                    input_file = 'data/YCB_Video/data'
+                    input_file = osp.join(input_file, '%04d/%06d-box.txt' % (seq_id, frame_id))
+                    names = []
+                    boxes = []
+                    with open(input_file) as f:
+                        while 1:
+                            input_line = f.readline()
+                            if not input_line:
+                                break
+                            if input_line[-1:] == '\n':
+                                input_line = input_line[:-1]
+                                name, b1, b2, b3, b4 = input_line.split(' ')
+                                boxes.append([b1, b2, b3, b4])
+                                names.append(name)
+                    names = np.array(names)
+                    boxes = np.array(boxes).astype(np.float)
 
                     # select the roi
                     if len(roi_index) > 1:
@@ -685,7 +702,9 @@ class YCBVideo(data.Dataset, datasets.imdb):
                         roi_blob = result['rois'][roi_index, :]
                         roi_blob = roi_blob[:, (0, 2, 3, 4, 5, 1)]
                         gt_box_blob = np.zeros((1, 5), dtype=np.float32)
-                        gt_box_blob[0, 1:] = gt['box'][j, :]
+                        """ This is the position where the temporary fix is needed """
+                        # gt_box_blob[0, 1:] = gt['box'][j, :]
+                        gt_box_blob[0, 1:] = boxes[names == self._classes_all[cls_index]][0]
                         overlaps = bbox_overlaps(
                             np.ascontiguousarray(roi_blob[:, :5], dtype=np.float),
                             np.ascontiguousarray(gt_box_blob, dtype=np.float)).flatten()
@@ -700,8 +719,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
                         # pose from network
                         RT[:3, :3] = quat2mat(result['poses'][roi_index, :4].flatten())
                         RT[:, 3] = result['poses'][roi_index, 4:]
-                        distances_sys[count, 0] = adi(RT[:3, :3], RT[:, 3],  RT_gt[:3, :3], RT_gt[:, 3], points)
-                        distances_non[count, 0] = add(RT[:3, :3], RT[:, 3],  RT_gt[:3, :3], RT_gt[:, 3], points)
+                        distances_sys[count, 0] = adi(RT[:3, :3], RT[:, 3], RT_gt[:3, :3], RT_gt[:, 3], points)
+                        distances_non[count, 0] = add(RT[:3, :3], RT[:, 3], RT_gt[:3, :3], RT_gt[:, 3], points)
                         errors_rotation[count, 0] = re(RT[:3, :3], RT_gt[:3, :3])
                         errors_translation[count, 0] = te(RT[:, 3], RT_gt[:, 3])
 
@@ -709,8 +728,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
                         if cfg.TEST.POSE_REFINE:
                             RT[:3, :3] = quat2mat(result['poses_refined'][roi_index, :4].flatten())
                             RT[:, 3] = result['poses_refined'][roi_index, 4:]
-                            distances_sys[count, 1] = adi(RT[:3, :3], RT[:, 3],  RT_gt[:3, :3], RT_gt[:, 3], points)
-                            distances_non[count, 1] = add(RT[:3, :3], RT[:, 3],  RT_gt[:3, :3], RT_gt[:, 3], points)
+                            distances_sys[count, 1] = adi(RT[:3, :3], RT[:, 3], RT_gt[:3, :3], RT_gt[:, 3], points)
+                            distances_non[count, 1] = add(RT[:3, :3], RT[:, 3], RT_gt[:3, :3], RT_gt[:, 3], points)
                             errors_rotation[count, 1] = re(RT[:3, :3], RT_gt[:3, :3])
                             errors_translation[count, 1] = te(RT[:, 3], RT_gt[:, 3])
                         else:
@@ -724,23 +743,23 @@ class YCBVideo(data.Dataset, datasets.imdb):
                         errors_rotation[count, :] = np.inf
                         errors_translation[count, :] = np.inf
 
-            distances_sys = distances_sys[:count+1, :]
-            distances_non = distances_non[:count+1, :]
-            errors_rotation = errors_rotation[:count+1, :]
-            errors_translation = errors_translation[:count+1, :]
-            results_seq_id = results_seq_id[:count+1]
-            results_frame_id = results_frame_id[:count+1]
-            results_object_id = results_object_id[:count+1]
-            results_cls_id = results_cls_id[:count+1]
+            distances_sys = distances_sys[:count + 1, :]
+            distances_non = distances_non[:count + 1, :]
+            errors_rotation = errors_rotation[:count + 1, :]
+            errors_translation = errors_translation[:count + 1, :]
+            results_seq_id = results_seq_id[:count + 1]
+            results_frame_id = results_frame_id[:count + 1]
+            results_object_id = results_object_id[:count + 1]
+            results_cls_id = results_cls_id[:count + 1]
 
             results_all = {'distances_sys': distances_sys,
-                       'distances_non': distances_non,
-                       'errors_rotation': errors_rotation,
-                       'errors_translation': errors_translation,
-                       'results_seq_id': results_seq_id,
-                       'results_frame_id': results_frame_id,
-                       'results_object_id': results_object_id,
-                       'results_cls_id': results_cls_id }
+                           'distances_non': distances_non,
+                           'errors_rotation': errors_rotation,
+                           'errors_translation': errors_translation,
+                           'results_seq_id': results_seq_id,
+                           'results_frame_id': results_frame_id,
+                           'results_object_id': results_object_id,
+                           'results_cls_id': results_cls_id}
 
             filename = os.path.join(output_dir, 'results_posecnn.mat')
             scipy.io.savemat(filename, results_all)
@@ -778,7 +797,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 D[ind] = np.inf
                 d = np.sort(D)
                 n = len(d)
-                accuracy = np.cumsum(np.ones((n, ), np.float32)) / n
+                accuracy = np.cumsum(np.ones((n,), np.float32)) / n
                 plt.plot(d, accuracy, color[i], linewidth=2)
                 ADDS[k, i] = VOCap(d, accuracy)
                 lengs.append('%s (%.2f)' % (leng[i], ADDS[k, i] * 100))
@@ -798,7 +817,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 D[ind] = np.inf
                 d = np.sort(D)
                 n = len(d)
-                accuracy = np.cumsum(np.ones((n, ), np.float32)) / n
+                accuracy = np.cumsum(np.ones((n,), np.float32)) / n
                 plt.plot(d, accuracy, color[i], linewidth=2)
                 ADD[k, i] = VOCap(d, accuracy)
                 lengs.append('%s (%.2f)' % (leng[i], ADD[k, i] * 100))
@@ -818,7 +837,7 @@ class YCBVideo(data.Dataset, datasets.imdb):
                 D[ind] = np.inf
                 d = np.sort(D)
                 n = len(d)
-                accuracy = np.cumsum(np.ones((n, ), np.float32)) / n
+                accuracy = np.cumsum(np.ones((n,), np.float32)) / n
                 plt.plot(d, accuracy, color[i], linewidth=2)
                 TS[k, i] = VOCap(d, accuracy)
                 lengs.append('%s (%.2f)' % (leng[i], TS[k, i] * 100))
@@ -852,8 +871,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
         print('==================ADD======================')
         for k in range(len(classes)):
             print('%s: %f' % (classes[k], ADD[k, 0]))
-        for k in range(len(classes)-1):
-            print('%f' % (ADD[k+1, 0]))
+        for k in range(len(classes) - 1):
+            print('%f' % (ADD[k + 1, 0]))
         print('%f' % (ADD[0, 0]))
         print(cfg.TRAIN.SNAPSHOT_INFIX)
         print('===========================================')
@@ -862,8 +881,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
         print('==================ADD-S====================')
         for k in range(len(classes)):
             print('%s: %f' % (classes[k], ADDS[k, 0]))
-        for k in range(len(classes)-1):
-            print('%f' % (ADDS[k+1, 0]))
+        for k in range(len(classes) - 1):
+            print('%f' % (ADDS[k + 1, 0]))
         print('%f' % (ADDS[0, 0]))
         print(cfg.TRAIN.SNAPSHOT_INFIX)
         print('===========================================')
@@ -872,8 +891,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
         print('==================ADD refined======================')
         for k in range(len(classes)):
             print('%s: %f' % (classes[k], ADD[k, 1]))
-        for k in range(len(classes)-1):
-            print('%f' % (ADD[k+1, 1]))
+        for k in range(len(classes) - 1):
+            print('%f' % (ADD[k + 1, 1]))
         print('%f' % (ADD[0, 1]))
         print(cfg.TRAIN.SNAPSHOT_INFIX)
         print('===========================================')
@@ -882,8 +901,8 @@ class YCBVideo(data.Dataset, datasets.imdb):
         print('==================ADD-S refined====================')
         for k in range(len(classes)):
             print('%s: %f' % (classes[k], ADDS[k, 1]))
-        for k in range(len(classes)-1):
-            print('%f' % (ADDS[k+1, 1]))
+        for k in range(len(classes) - 1):
+            print('%f' % (ADDS[k + 1, 1]))
         print('%f' % (ADDS[0, 1]))
         print(cfg.TRAIN.SNAPSHOT_INFIX)
         print('===========================================')
