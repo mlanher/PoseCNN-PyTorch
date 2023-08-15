@@ -18,7 +18,7 @@ from layers.pose_target_layer import pose_target_layer
 from fcn.config import cfg
 
 __all__ = [
-    'posecnn',
+    'posecnn_rot_diffusion',
 ]
 
 vgg16 = models.vgg16(pretrained=False)
@@ -75,10 +75,10 @@ def upsample(scale_factor):
     return nn.Upsample(scale_factor=scale_factor, mode='bilinear')
 
 
-class PoseCNN(nn.Module):
+class PoseCNNRotDiffusion(nn.Module):
 
     def __init__(self, num_classes, num_units):
-        super(PoseCNN, self).__init__()
+        super(PoseCNNRotDiffusion, self).__init__()
         self.num_classes = num_classes
 
         # conv features
@@ -252,9 +252,9 @@ class PoseCNN(nn.Module):
         return [param for name, param in self.named_parameters() if 'bias' in name]
 
 
-def posecnn(num_classes, num_units, data=None):
+def posecnn_rot_diffusion(num_classes, num_units, data=None):
 
-    model = PoseCNN(num_classes, num_units)
+    model = PoseCNNRotDiffusion(num_classes, num_units)
 
     if data is not None:
         model_dict = model.state_dict()

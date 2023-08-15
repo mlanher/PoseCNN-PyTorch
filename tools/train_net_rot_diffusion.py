@@ -58,7 +58,7 @@ def parse_args():
                         action='store_true')
     parser.add_argument('--network', dest='network_name',
                         help='name of the network',
-                        default=None, type=str)
+                        default="posecnn_rot_diffusion", type=str)
 
     if len(sys.argv) == 1:
         parser.print_help()
@@ -127,10 +127,6 @@ if __name__ == '__main__':
         network_data = None
         print("=> creating network '{}'".format(args.network_name))
 
-    print("---")
-    print(networks)
-    print(networks.__dict__.keys())
-    print("---")
     network = networks.__dict__[args.network_name](dataset.num_classes, cfg.TRAIN.NUM_UNITS, network_data).cuda()
     if torch.cuda.device_count() > 1:
         cfg.TRAIN.GPUNUM = torch.cuda.device_count()
