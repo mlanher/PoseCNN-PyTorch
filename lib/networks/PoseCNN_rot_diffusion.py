@@ -262,10 +262,12 @@ class PoseCNNRotDiffusion(nn.Module):
             return out_label, out_vertex, rois, out_pose, out_quaternion"""
 
     def weight_parameters(self):
-        return [param for name, param in self.named_parameters() if 'weight' in name]
+        parameters = [param for name, param in self.named_parameters() if 'weight' in name]
+        return list(filter(lambda p: p.requires_grad, parameters))
 
     def bias_parameters(self):
-        return [param for name, param in self.named_parameters() if 'bias' in name]
+        parameters = [param for name, param in self.named_parameters() if 'bias' in name]
+        return list(filter(lambda p: p.requires_grad, parameters))
 
 
 def posecnn_rot_diffusion(num_classes, num_units, data=None):
@@ -293,5 +295,14 @@ def posecnn_rot_diffusion(num_classes, num_units, data=None):
         print('=================================================')
         model_dict.update(pretrained_dict)
         model.load_state_dict(model_dict)
+
+        # Freeze all parameters
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # Unfreeze all parameters not loaded
+        for name, param in model.named_parameters():
+            if name not in pretrained_dict:
+                param.requires_grad = True
 
     return model
