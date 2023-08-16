@@ -1,14 +1,15 @@
 # Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
 # This work is licensed under the NVIDIA Source Code License - Non-commercial. Full
 # text can be found in LICENSE.md
+from typing import Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.models as models
 from fcn.config import cfg
 from layers.hard_label import HardLabel
 from layers.hough_voting import HoughVoting
-from layers.point_matching_loss import PMLoss
 from layers.pose_target_layer import pose_target_layer
 from layers.roi_pooling import RoIPool
 from layers.roi_target_layer import roi_target_layer
@@ -76,7 +77,53 @@ def upsample(scale_factor):
     return nn.Upsample(scale_factor=scale_factor, mode='bilinear')
 
 
+class DSM:
+    @staticmethod
+    def marginal_prob_std(t: torch.Tensor, sigma=0.5):
+        """
+        Represents "shaped" version of standard deviation.
+        """
+        return torch.sqrt((sigma ** (2 * t) - 1.) / (2. * np.log(sigma)))
+
+    @staticmethod
+    def marginal_prob_std_np(t, sigma=0.5):
+        return np.sqrt((sigma ** (2 * t) - 1.) / (2. * np.log(sigma)))
+
+    @staticmethod
+    def perturb(tensor: torch.Tensor, eps=1e-5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        noise_scale = torch.rand_like(tensor[..., 0], device=tensor.device) * (1. - eps) + eps
+        z = torch.randn_like(tensor)
+        std = DSM.marginal_prob_std(noise_scale)
+        perturbed_t = tensor + z * std[..., None]
+        return perturbed_t, noise_scale, z, std
+
+
+class RotationDiffusion(nn.Module):
+    """ Diffusion model to predict rotations as quaternion. """
+
+    def __init__(self, num_classes):
+        super(RotationDiffusion, self).__init__()
+
+        # Results RoI pooling, noisy rotation targets, noise scale
+        self.fc1 = nn.Linear(512 * 7 * 7 + num_classes * 4 + 1, 4096)
+        self.fc2 = nn.Linear(4096, 4096)
+        self.fc3 = nn.Linear(4096, 4 * num_classes)
+
+        self.tanh = nn.Tanh()
+
+    def forward(self, roi_pool, noisy_poses_target, noise_scale):
+        out = torch.cat((roi_pool, noisy_poses_target, noise_scale), dim=1)
+        out = self.tanh(self.fc1(out))
+        out = self.tanh(self.fc2(out))
+        out = self.tanh(self.fc3(out))
+        return out
+
+
 class PoseCNNRotDiffusion(nn.Module):
+    """
+    Uses diffusion model for rotation prediction. Only works on RGB images and YCB Video dataset with config
+    published on original repository.
+    """
 
     def __init__(self, num_classes, num_units):
         super(PoseCNNRotDiffusion, self).__init__()
@@ -84,32 +131,12 @@ class PoseCNNRotDiffusion(nn.Module):
 
         # conv features
         features = list(vgg16.features)[:30]
-
-        # change the first conv layer for RGBD
-        if cfg.INPUT == 'RGBD':
-            conv0 = conv(6, 64, kernel_size=3, relu=False)
-            conv0.weight.data[:, :3, :, :] = features[0].weight.data
-            conv0.weight.data[:, 3:, :, :] = features[0].weight.data
-            conv0.bias.data = features[0].bias.data
-            features[0] = conv0
-
         self.features = nn.ModuleList(features)
         self.classifier = vgg16.classifier[:-1]
-        if cfg.TRAIN.SLIM:
-            dim_fc = 256
-            self.classifier[0] = nn.Linear(512 * 7 * 7, 256)
-            self.classifier[3] = nn.Linear(256, 256)
-        else:
-            dim_fc = 4096
 
-        print(self.features)
-        print(self.classifier)
-
-        # freeze some layers
-        if cfg.TRAIN.FREEZE_LAYERS:
-            for i in [0, 2, 5, 7, 10, 12, 14]:
-                self.features[i].weight.requires_grad = False
-                self.features[i].bias.requires_grad = False
+        # Diffusion model for rotation prediction
+        self.rotation_model = RotationDiffusion(num_classes)
+        self.rot_loss = nn.L1Loss()
 
         # semantic labeling branch
         self.conv4_embed = conv(512, num_units, kernel_size=1)
@@ -121,25 +148,22 @@ class PoseCNNRotDiffusion(nn.Module):
                                     sample_percentage=cfg.TRAIN.HARD_LABEL_SAMPLING)
         self.dropout = nn.Dropout()
 
-        if cfg.TRAIN.VERTEX_REG:
-            # center regression branch
-            self.conv4_vertex_embed = conv(512, 2 * num_units, kernel_size=1, relu=False)
-            self.conv5_vertex_embed = conv(512, 2 * num_units, kernel_size=1, relu=False)
-            self.upsample_conv5_vertex_embed = upsample(2.0)
-            self.upsample_vertex_embed = upsample(8.0)
-            self.conv_vertex_score = conv(2 * num_units, 3 * num_classes, kernel_size=1, relu=False)
-            # hough voting
-            self.hough_voting = HoughVoting(is_train=0, skip_pixels=10, label_threshold=100, \
-                                            inlier_threshold=0.9, voting_threshold=-1, per_threshold=0.01)
+        # center regression branch
+        self.conv4_vertex_embed = conv(512, 2 * num_units, kernel_size=1, relu=False)
+        self.conv5_vertex_embed = conv(512, 2 * num_units, kernel_size=1, relu=False)
+        self.upsample_conv5_vertex_embed = upsample(2.0)
+        self.upsample_vertex_embed = upsample(8.0)
+        self.conv_vertex_score = conv(2 * num_units, 3 * num_classes, kernel_size=1, relu=False)
+        # hough voting
+        self.hough_voting = HoughVoting(is_train=0, skip_pixels=10, label_threshold=100, inlier_threshold=0.9,
+                                        voting_threshold=-1, per_threshold=0.01)
 
-            self.roi_pool_conv4 = RoIPool(pool_height=7, pool_width=7, spatial_scale=1.0 / 8.0)
-            self.roi_pool_conv5 = RoIPool(pool_height=7, pool_width=7, spatial_scale=1.0 / 16.0)
-            self.fc8 = fc(dim_fc, num_classes)
-            self.fc9 = fc(dim_fc, 4 * num_classes, relu=False)
+        self.roi_pool_conv4 = RoIPool(pool_height=7, pool_width=7, spatial_scale=1.0 / 8.0)
+        self.roi_pool_conv5 = RoIPool(pool_height=7, pool_width=7, spatial_scale=1.0 / 16.0)
 
-            if cfg.TRAIN.POSE_REG:
-                self.fc10 = fc(dim_fc, 4 * num_classes, relu=False)
-                self.pml = PMLoss(hard_angle=cfg.TRAIN.HARD_ANGLE)
+        dim_fc = 4096
+        self.fc8 = fc(dim_fc, num_classes)
+        self.fc9 = fc(dim_fc, 4 * num_classes, relu=False)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
@@ -172,116 +196,70 @@ class PoseCNNRotDiffusion(nn.Module):
         out_label = torch.max(out_prob, dim=1)[1].type(torch.IntTensor).cuda()
         out_weight = self.hard_label(out_prob, label_gt, torch.rand(out_prob.size()).cuda())
 
-        if cfg.TRAIN.VERTEX_REG:
-            # center regression branch
-            out_conv4_vertex_embed = self.conv4_vertex_embed(out_conv4_3)
-            out_conv5_vertex_embed = self.conv5_vertex_embed(out_conv5_3)
-            out_conv5_vertex_embed_up = self.upsample_conv5_vertex_embed(out_conv5_vertex_embed)
-            out_vertex_embed = self.dropout(out_conv4_vertex_embed + out_conv5_vertex_embed_up)
-            out_vertex_embed_up = self.upsample_vertex_embed(out_vertex_embed)
-            out_vertex = self.conv_vertex_score(out_vertex_embed_up)
+        # center regression branch
+        out_conv4_vertex_embed = self.conv4_vertex_embed(out_conv4_3)
+        out_conv5_vertex_embed = self.conv5_vertex_embed(out_conv5_3)
+        out_conv5_vertex_embed_up = self.upsample_conv5_vertex_embed(out_conv5_vertex_embed)
+        out_vertex_embed = self.dropout(out_conv4_vertex_embed + out_conv5_vertex_embed_up)
+        out_vertex_embed_up = self.upsample_vertex_embed(out_vertex_embed)
+        out_vertex = self.conv_vertex_score(out_vertex_embed_up)
 
-            # hough voting
-            if self.training:
-                self.hough_voting.is_train = 1
-                self.hough_voting.label_threshold = cfg.TRAIN.HOUGH_LABEL_THRESHOLD
-                self.hough_voting.voting_threshold = cfg.TRAIN.HOUGH_VOTING_THRESHOLD
-                self.hough_voting.skip_pixels = cfg.TRAIN.HOUGH_SKIP_PIXELS
-                self.hough_voting.inlier_threshold = cfg.TRAIN.HOUGH_INLIER_THRESHOLD
-            else:
-                self.hough_voting.is_train = 0
-                self.hough_voting.label_threshold = cfg.TEST.HOUGH_LABEL_THRESHOLD
-                self.hough_voting.voting_threshold = cfg.TEST.HOUGH_VOTING_THRESHOLD
-                self.hough_voting.skip_pixels = cfg.TEST.HOUGH_SKIP_PIXELS
-                self.hough_voting.inlier_threshold = cfg.TEST.HOUGH_INLIER_THRESHOLD
-            out_box, out_pose = self.hough_voting(out_label, out_vertex, meta_data, extents)
-            print("--- OUTPOSE ---")
-            print(out_pose.size())
+        # hough voting
+        if self.training:
+            self.hough_voting.is_train = 1
+            self.hough_voting.label_threshold = cfg.TRAIN.HOUGH_LABEL_THRESHOLD
+            self.hough_voting.voting_threshold = cfg.TRAIN.HOUGH_VOTING_THRESHOLD
+            self.hough_voting.skip_pixels = cfg.TRAIN.HOUGH_SKIP_PIXELS
+            self.hough_voting.inlier_threshold = cfg.TRAIN.HOUGH_INLIER_THRESHOLD
+        else:
+            self.hough_voting.is_train = 0
+            self.hough_voting.label_threshold = cfg.TEST.HOUGH_LABEL_THRESHOLD
+            self.hough_voting.voting_threshold = cfg.TEST.HOUGH_VOTING_THRESHOLD
+            self.hough_voting.skip_pixels = cfg.TEST.HOUGH_SKIP_PIXELS
+            self.hough_voting.inlier_threshold = cfg.TEST.HOUGH_INLIER_THRESHOLD
+        out_box, out_pose = self.hough_voting(out_label, out_vertex, meta_data, extents)
 
-            # bounding box classification and regression branch
-            bbox_labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = roi_target_layer(out_box, gt_boxes)
-            out_roi_conv4 = self.roi_pool_conv4(out_conv4_3, out_box)
-            out_roi_conv5 = self.roi_pool_conv5(out_conv5_3, out_box)
-            out_roi = out_roi_conv4 + out_roi_conv5
-            out_roi_flatten = out_roi.view(out_roi.size(0), -1)
-            out_fc7 = self.classifier(out_roi_flatten)
-            out_fc8 = self.fc8(out_fc7)
-            out_logsoftmax_box = log_softmax_high_dimension(out_fc8)
-            bbox_prob = softmax_high_dimension(out_fc8)
-            bbox_label_weights = self.hard_label(bbox_prob, bbox_labels, torch.rand(bbox_prob.size()).cuda())
-            bbox_pred = self.fc9(out_fc7)
+        # bounding box classification and regression branch
+        bbox_labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = roi_target_layer(out_box, gt_boxes)
+        out_roi_conv4 = self.roi_pool_conv4(out_conv4_3, out_box)
+        out_roi_conv5 = self.roi_pool_conv5(out_conv5_3, out_box)
+        out_roi = out_roi_conv4 + out_roi_conv5
+        out_roi_flatten = out_roi.view(out_roi.size(0), -1)
+        out_fc7 = self.classifier(out_roi_flatten)
+        out_fc8 = self.fc8(out_fc7)
+        out_logsoftmax_box = log_softmax_high_dimension(out_fc8)
+        bbox_prob = softmax_high_dimension(out_fc8)
+        bbox_label_weights = self.hard_label(bbox_prob, bbox_labels, torch.rand(bbox_prob.size()).cuda())
+        bbox_pred = self.fc9(out_fc7)
 
-            # rotation regression branch
-            rois, poses_target, poses_weight = pose_target_layer(out_box, bbox_prob, bbox_pred, gt_boxes, poses,
-                                                                 self.training)
-            if cfg.TRAIN.POSE_REG:
-                out_qt_conv4 = self.roi_pool_conv4(out_conv4_3, rois)
-                out_qt_conv5 = self.roi_pool_conv5(out_conv5_3, rois)
-                out_qt = out_qt_conv4 + out_qt_conv5
-                out_qt_flatten = out_qt.view(out_qt.size(0), -1)
-                out_qt_fc7 = self.classifier(out_qt_flatten)
-                out_quaternion = self.fc10(out_qt_fc7)
-                # point matching loss
-                poses_pred = nn.functional.normalize(torch.mul(out_quaternion, poses_weight))
+        # rotation regression branch
+        # poses target values are in (-1, 1)
+        rois, poses_target, poses_weight = pose_target_layer(out_box, bbox_prob, bbox_pred, gt_boxes, poses,
+                                                             self.training)
+        poses_target_noisy, noise_scale, z_target, std = DSM.perturb(poses_target)
+        noise_scale = noise_scale.unsqueeze(1)
+        poses_target_noisy = poses_target_noisy.detach().requires_grad_(True)
 
-                def update_values(filename, new_values, mode="max"):
-                    # Check if file is empty or doesn't exist
-                    try:
-                        with open(filename, 'r') as file:
-                            content = file.read()
-                            if not content:
-                                saved_values = []
-                            else:
-                                saved_values = list(map(float, content.split(',')))
-                    except FileNotFoundError:
-                        saved_values = []
+        out_qt_conv4 = self.roi_pool_conv4(out_conv4_3, rois)
+        out_qt_conv5 = self.roi_pool_conv5(out_conv5_3, rois)
+        out_qt = out_qt_conv4 + out_qt_conv5
+        out_qt_flatten = out_qt.view(out_qt.size(0), -1)
 
-                    # If saved_values is empty, directly write new_values to the file
-                    if not saved_values:
-                        with open(filename, 'w') as file:
-                            file.write(','.join(map(str, new_values)))
-                        return
+        # TODO: If not in training use annealed langevin dynamics!
 
-                    # Compare and update max values
-                    if mode == "max":
-                        values = [str(max(a, b)) for a, b in zip(saved_values, new_values)]
-                    elif mode == "min":
-                        values = [str(min(a, b)) for a, b in zip(saved_values, new_values)]
-
-                    # Write the max values back to the file
-                    with open(filename, 'w') as file:
-                        file.write(','.join(values))
-
-                fname_min = "target_poses_min.txt"
-                fname_max = "target_poses_max.txt"
-                poses_target_reshaped = poses_target.view(poses_target.size(0), -1, 4)
-                max_values_list = torch.max(poses_target_reshaped, dim=1).values.max(dim=0).values.tolist()
-                min_values_list = torch.min(poses_target_reshaped, dim=1).values.min(dim=0).values.tolist()
-                update_values(fname_max, max_values_list, mode="max")
-                update_values(fname_min, min_values_list, mode="min")
-
-
-                if self.training:
-                    loss_pose = self.pml(poses_pred, poses_target, poses_weight, points, symmetry)
+        with torch.set_grad_enabled(True):
+            z_pred = self.rotation_model(out_qt_flatten, poses_target_noisy, noise_scale)
+            z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
 
         if self.training:
-            if cfg.TRAIN.VERTEX_REG:
-                if cfg.TRAIN.POSE_REG:
-                    return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, \
-                        bbox_pred, bbox_targets, bbox_inside_weights, loss_pose, poses_weight
-                else:
-                    return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, \
-                        bbox_pred, bbox_targets, bbox_inside_weights
-            else:
-                return out_logsoftmax, out_weight
-        else:
-            if cfg.TRAIN.VERTEX_REG:
-                if cfg.TRAIN.POSE_REG:
-                    return out_label, out_vertex, rois, out_pose, out_quaternion
-                else:
-                    return out_label, out_vertex, rois, out_pose
-            else:
-                return out_label
+            loss_pose = self.rot_loss(z_pred_weighted * std[..., None], z_target)
+
+        if self.training:
+            return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, \
+                bbox_pred, bbox_targets, bbox_inside_weights, loss_pose, poses_weight
+        # TODO: Implement return if not in training!
+        """else:
+            return out_label, out_vertex, rois, out_pose, out_quaternion"""
 
     def weight_parameters(self):
         return [param for name, param in self.named_parameters() if 'weight' in name]
