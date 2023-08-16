@@ -23,6 +23,7 @@ class RoIPoolFunction(Function):
 
     @staticmethod
     def backward(ctx, top_diff):
+        top_diff = top_diff.contiguous()
         argmax_data = ctx.saved_variables[0]
         rois = ctx.saved_variables[1]
         batch_size, num_channels, data_height, data_width = ctx.feature_size
