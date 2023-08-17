@@ -2,18 +2,15 @@
 # This work is licensed under the NVIDIA Source Code License - Non-commercial. Full
 # text can be found in LICENSE.md
 
-import torch
-import torch.nn as nn
 import time
-import sys, os
-import numpy as np
-import matplotlib.pyplot as plt
 
+import numpy as np
+import torch
 from fcn.config import cfg
-from transforms3d.quaternions import mat2quat, quat2mat, qmult
-from utils.se3 import *
+from transforms3d.quaternions import quat2mat
 from utils.nms import *
-from utils.pose_error import re, te
+from utils.se3 import *
+
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -44,7 +41,7 @@ def loss_cross_entropy(scores, labels):
     """
 
     cross_entropy = -torch.sum(labels * scores, dim=1)
-    loss = torch.div(torch.sum(cross_entropy), torch.sum(labels)+1e-10)
+    loss = torch.div(torch.sum(cross_entropy), torch.sum(labels) + 1e-10)
 
     return loss
 
@@ -56,13 +53,14 @@ def smooth_l1_loss(vertex_pred, vertex_targets, vertex_weights, sigma=1.0):
     abs_diff = torch.abs(diff)
     smoothL1_sign = torch.lt(abs_diff, 1. / sigma_2).float().detach()
     in_loss = torch.pow(diff, 2) * (sigma_2 / 2.) * smoothL1_sign \
-            + (abs_diff - (0.5 / sigma_2)) * (1. - smoothL1_sign)
-    loss = torch.div( torch.sum(in_loss), torch.sum(vertex_weights) + 1e-10 )
+              + (abs_diff - (0.5 / sigma_2)) * (1. - smoothL1_sign)
+    loss = torch.div(torch.sum(in_loss), torch.sum(vertex_weights) + 1e-10)
     return loss
 
-#************************************#
+
+# ************************************#
 #    train PoseCNN                   #
-#************************************#
+# ************************************#
 
 '''
 sample = {'image_color': im_blob,
@@ -80,12 +78,16 @@ sample = {'image_color': im_blob,
           'vertex_weights': vertex_weights}
 '''
 
-def train(train_loader, background_loader, network, optimizer, epoch):
 
+def train(train_loader, background_loader, network, optimizer, epoch):
     batch_time = AverageMeter()
     losses = AverageMeter()
 
     epoch_size = len(train_loader)
+    fname_epoch_size = "epoch_size.txt"
+    with open(fname_epoch_size, "a") as f:
+        f.write(str(epoch_size) + "\n")
+
     enum_background = enumerate(background_loader)
     pixel_mean = torch.from_numpy(cfg.PIXEL_MEANS.transpose(2, 0, 1) / 255.0).float()
 
@@ -149,8 +151,10 @@ def train(train_loader, background_loader, network, optimizer, epoch):
                 loss_location = smooth_l1_loss(bbox_pred, bbox_targets, bbox_inside_weights)
                 loss_pose = torch.mean(loss_pose_tensor)
                 loss = loss_label + loss_vertex + loss_box + loss_location + loss_pose
-                print("LOSS POSE ---")
-                print(loss_pose)
+                fname_loss = "losses.txt"
+                loss_to_save = loss_pose.item()
+                with open(fname_loss, "a") as f:
+                    f.write(str(loss_to_save) + "\n")
             else:
                 out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, \
                     bbox_labels, bbox_pred, bbox_targets, bbox_inside_weights \
@@ -181,28 +185,33 @@ def train(train_loader, background_loader, network, optimizer, epoch):
                 num_bg = torch.sum(bbox_labels[:, 0])
                 num_fg = torch.sum(torch.sum(bbox_labels[:, 1:], dim=1))
                 num_fg_pose = torch.sum(torch.sum(poses_weight[:, 4:], dim=1)) / 4
-                print('[%d/%d][%d/%d], %.4f, label %.4f, center %.4f, box %.4f (%03d, %03d), loc %.4f, pose %.4f (%03d), lr %.6f, time %.2f' \
-                   % (epoch, cfg.epochs, i, epoch_size, loss.data, loss_label.data, loss_vertex.data, loss_box.data, num_fg.data, num_bg.data, \
-                      loss_location.data, loss_pose.data, num_fg_pose, optimizer.param_groups[0]['lr'], batch_time.val))
+                print(
+                    '[%d/%d][%d/%d], %.4f, label %.4f, center %.4f, box %.4f (%03d, %03d), loc %.4f, pose %.4f (%03d), lr %.6f, time %.2f' \
+                    % (epoch, cfg.epochs, i, epoch_size, loss.data, loss_label.data, loss_vertex.data, loss_box.data,
+                       num_fg.data, num_bg.data, \
+                       loss_location.data, loss_pose.data, num_fg_pose, optimizer.param_groups[0]['lr'],
+                       batch_time.val))
             else:
                 num_bg = torch.sum(bbox_labels[:, 0])
                 num_fg = torch.sum(torch.sum(bbox_labels[:, 1:], dim=1))
-                print('[%d/%d][%d/%d], %.4f, label %.4f, center %.4f, box %.4f (%03d, %03d), loc %.4f, lr %.6f, time %.2f' \
-                   % (epoch, cfg.epochs, i, epoch_size, loss.data, loss_label.data, loss_vertex.data, loss_box.data, num_fg.data, num_bg.data, \
-                      loss_location.data, optimizer.param_groups[0]['lr'], batch_time.val))
+                print(
+                    '[%d/%d][%d/%d], %.4f, label %.4f, center %.4f, box %.4f (%03d, %03d), loc %.4f, lr %.6f, time %.2f' \
+                    % (epoch, cfg.epochs, i, epoch_size, loss.data, loss_label.data, loss_vertex.data, loss_box.data,
+                       num_fg.data, num_bg.data, \
+                       loss_location.data, optimizer.param_groups[0]['lr'], batch_time.val))
         else:
             print('[%d/%d][%d/%d], loss %.4f, lr %.6f, time %.2f' \
-               % (epoch, cfg.epochs, i, epoch_size, loss, optimizer.param_groups[0]['lr'], batch_time.val))
+                  % (epoch, cfg.epochs, i, epoch_size, loss, optimizer.param_groups[0]['lr'], batch_time.val))
         cfg.TRAIN.ITERS += 1
 
 
 def _get_bb3D(extent):
     bb = np.zeros((3, 8), dtype=np.float32)
-    
+
     xHalf = extent[0] * 0.5
     yHalf = extent[1] * 0.5
     zHalf = extent[2] * 0.5
-    
+
     bb[:, 0] = [xHalf, yHalf, zHalf]
     bb[:, 1] = [-xHalf, yHalf, zHalf]
     bb[:, 2] = [xHalf, -yHalf, zHalf]
@@ -211,12 +220,11 @@ def _get_bb3D(extent):
     bb[:, 5] = [-xHalf, yHalf, -zHalf]
     bb[:, 6] = [xHalf, -yHalf, -zHalf]
     bb[:, 7] = [-xHalf, -yHalf, -zHalf]
-    
+
     return bb
 
 
 def _vis_minibatch(inputs, background, labels, vertex_targets, sample, class_colors):
-
     """Visualize a mini-batch for debugging."""
     import matplotlib.pyplot as plt
 
@@ -237,13 +245,13 @@ def _vis_minibatch(inputs, background, labels, vertex_targets, sample, class_col
     else:
         m = 3
         n = 4
-    
+
     for i in range(im_blob.shape[0]):
         fig = plt.figure()
         start = 1
 
         metadata = meta_data_blob[i, :]
-        intrinsic_matrix = metadata[:9].reshape((3,3))
+        intrinsic_matrix = metadata[:9].reshape((3, 3))
 
         # show image
         if cfg.INPUT == 'COLOR' or cfg.INPUT == 'RGBD':
@@ -299,7 +307,7 @@ def _vis_minibatch(inputs, background, labels, vertex_targets, sample, class_col
             bb3d = _get_bb3D(extents[class_id, :])
             x3d = np.ones((4, 8), dtype=np.float32)
             x3d[0:3, :] = bb3d
-            
+
             # projection
             RT = np.zeros((3, 4), dtype=np.float32)
 
@@ -318,7 +326,8 @@ def _vis_minibatch(inputs, background, labels, vertex_targets, sample, class_col
             x2 = np.max(x2d[0, :])
             y1 = np.min(x2d[1, :])
             y2 = np.max(x2d[1, :])
-            plt.gca().add_patch(plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, edgecolor='g', linewidth=3, clip_on=False))
+            plt.gca().add_patch(
+                plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='g', linewidth=3, clip_on=False))
 
         if cfg.INPUT == 'COLOR' or cfg.INPUT == 'RGBD':
             im_background = background_color[i]
@@ -349,7 +358,7 @@ def _vis_minibatch(inputs, background, labels, vertex_targets, sample, class_col
             x2 = boxes[j, 2]
             y2 = boxes[j, 3]
             plt.gca().add_patch(
-                plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, edgecolor='g', linewidth=3, clip_on=False))
+                plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='g', linewidth=3, clip_on=False))
 
         # show label
         label = label_blob[i, :, :, :]
@@ -376,23 +385,23 @@ def _vis_minibatch(inputs, background, labels, vertex_targets, sample, class_col
             for j in range(1, num_classes):
                 index = np.where(label[:, :, j] > 0)
                 if len(index[0]) > 0:
-                    center[0, index[0], index[1]] = vertex_target[3*j, index[0], index[1]]
-                    center[1, index[0], index[1]] = vertex_target[3*j+1, index[0], index[1]]
-                    center[2, index[0], index[1]] = np.exp(vertex_target[3*j+2, index[0], index[1]])
+                    center[0, index[0], index[1]] = vertex_target[3 * j, index[0], index[1]]
+                    center[1, index[0], index[1]] = vertex_target[3 * j + 1, index[0], index[1]]
+                    center[2, index[0], index[1]] = np.exp(vertex_target[3 * j + 2, index[0], index[1]])
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[0,:,:])
-            ax.set_title('center x') 
+            plt.imshow(center[0, :, :])
+            ax.set_title('center x')
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[1,:,:])
+            plt.imshow(center[1, :, :])
             ax.set_title('center y')
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[2,:,:])
+            plt.imshow(center[2, :, :])
             ax.set_title('z')
 
         plt.show()
