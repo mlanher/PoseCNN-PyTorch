@@ -106,7 +106,7 @@ class DSM:
              noise_off: If true, particles directly follow gradient.
         """
         # This prevents a torch.cuda.OutOfMemoryError in for-loop of sample method
-        poses_target_noisy_ = poses_noisy.clone().detach()
+        poses_noisy_ = poses_noisy.clone().detach()
 
         phase = (horizon - step) / horizon + eps
         sigma_T = DSM.marginal_prob_std_np(eps)
@@ -114,15 +114,18 @@ class DSM:
         ratio = sigma_i ** 2 / sigma_T ** 2
         c_lr = 1e-2 if noise_off else alpha * ratio
 
-        noise_scale = phase * torch.ones_like(poses_target_noisy_[..., 0], device=poses_target_noisy_.device)
+        noise_scale = phase * torch.ones_like(poses_noisy_[..., 0], device=poses_noisy_.device)
+        print("---DEVICES---")
+        print(input_features.device)
+        print(poses_noisy_.device)
+        print(noise_scale.device)
+        z_pred = model.rotation_model(input_features, poses_noisy_, noise_scale.unsqueeze(1))
 
-        z_pred = model.rotation_model(input_features, poses_target_noisy_, noise_scale.unsqueeze(1))
-
-        noise = torch.zeros_like(poses_target_noisy_) if noise_off else torch.randn_like(
-            poses_target_noisy_) * noise_std
+        noise = torch.zeros_like(poses_noisy_) if noise_off else torch.randn_like(
+            poses_noisy_) * noise_std
 
         delta = -c_lr / 2 * z_pred + np.sqrt(c_lr) * noise
-        return poses_target_noisy_ + delta
+        return poses_noisy_ + delta
 
     @staticmethod
     def _sample_annealed_langevin(model: nn.Module, input_features: torch.Tensor, poses_init: torch.Tensor, horizon=100,
