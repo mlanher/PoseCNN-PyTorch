@@ -300,9 +300,9 @@ class PoseCNNRotDiffusion(nn.Module):
                 poses_target_noisy = poses_target_noisy.detach().requires_grad_(True)
 
                 z_pred = self.rotation_model(out_qt_flatten, poses_target_noisy, noise_scale)
-                z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
+                # z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
 
-            loss_pose = self.rot_loss(z_pred_weighted * std[..., None], z_target)
+            loss_pose = self.rot_loss(z_pred * std[..., None], z_target)
 
             return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, bbox_pred, \
                 bbox_targets, bbox_inside_weights, loss_pose, poses_weight
