@@ -85,7 +85,7 @@ def train(train_loader, background_loader, network, optimizer, epoch):
 
     epoch_size = len(train_loader)
     fname_epoch_size = "epoch_size.txt"
-    with open("/training_logs/" + fname_epoch_size, "a") as f:
+    with open(fname_epoch_size, "a") as f:
         f.write(str(epoch_size) + "\n")
 
     enum_background = enumerate(background_loader)
@@ -153,7 +153,7 @@ def train(train_loader, background_loader, network, optimizer, epoch):
                 loss = loss_label + loss_vertex + loss_box + loss_location + loss_pose
                 fname_loss = "losses.txt"
                 loss_to_save = loss_pose.item()
-                with open("/training_logs/" + fname_loss, "a") as f:
+                with open(fname_loss, "a") as f:
                     f.write(str(loss_to_save) + "\n")
             else:
                 out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, \
