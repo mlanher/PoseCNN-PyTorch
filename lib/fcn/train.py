@@ -149,6 +149,8 @@ def train(train_loader, background_loader, network, optimizer, epoch):
                 loss_location = smooth_l1_loss(bbox_pred, bbox_targets, bbox_inside_weights)
                 loss_pose = torch.mean(loss_pose_tensor)
                 loss = loss_label + loss_vertex + loss_box + loss_location + loss_pose
+                print("LOSS POSE ---")
+                print(loss_pose)
             else:
                 out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, \
                     bbox_labels, bbox_pred, bbox_targets, bbox_inside_weights \
