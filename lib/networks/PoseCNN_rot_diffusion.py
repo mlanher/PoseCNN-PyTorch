@@ -115,10 +115,6 @@ class DSM:
         c_lr = 1e-2 if noise_off else alpha * ratio
 
         noise_scale = phase * torch.ones_like(poses_noisy_[..., 0], device=poses_noisy_.device)
-        print("---DEVICES---")
-        print(input_features.device)
-        print(poses_noisy_.device)
-        print(noise_scale.device)
         z_pred = model.rotation_model(input_features, poses_noisy_, noise_scale.unsqueeze(1))
 
         noise = torch.zeros_like(poses_noisy_) if noise_off else torch.randn_like(
@@ -219,8 +215,6 @@ class PoseCNNRotDiffusion(nn.Module):
         self.fc8 = fc(dim_fc, num_classes)
         self.fc9 = fc(dim_fc, 4 * num_classes, relu=False)
 
-        self.device = next(self.parameters()).device
-
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 kaiming_normal_(m.weight.data)
@@ -231,6 +225,7 @@ class PoseCNNRotDiffusion(nn.Module):
                 m.bias.data.zero_()
 
     def forward(self, x, label_gt, meta_data, extents, gt_boxes, poses, points, symmetry):
+        device = next(self.parameters()).device
 
         # conv features
         for i, model in enumerate(self.features):
@@ -292,9 +287,6 @@ class PoseCNNRotDiffusion(nn.Module):
         # poses target values are in (-1, 1)
         rois, poses_target, poses_weight = pose_target_layer(out_box, bbox_prob, bbox_pred, gt_boxes, poses,
                                                              self.training)
-        poses_target_noisy, noise_scale, z_target, std = DSM.perturb(poses_target)
-        noise_scale = noise_scale.unsqueeze(1)
-        poses_target_noisy = poses_target_noisy.detach().requires_grad_(True)
 
         out_qt_conv4 = self.roi_pool_conv4(out_conv4_3, rois)
         out_qt_conv5 = self.roi_pool_conv5(out_conv5_3, rois)
@@ -303,6 +295,10 @@ class PoseCNNRotDiffusion(nn.Module):
 
         if self.training:
             with torch.set_grad_enabled(True):
+                poses_target_noisy, noise_scale, z_target, std = DSM.perturb(poses_target)
+                noise_scale = noise_scale.unsqueeze(1)
+                poses_target_noisy = poses_target_noisy.detach().requires_grad_(True)
+
                 z_pred = self.rotation_model(out_qt_flatten, poses_target_noisy, noise_scale)
                 z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
 
@@ -312,9 +308,9 @@ class PoseCNNRotDiffusion(nn.Module):
                 bbox_targets, bbox_inside_weights, loss_pose, poses_weight
         else:
             # TODO: Return annealed langevin dynamics history to visualize it
-            out_quaternion, _ = DSM.sample(self.device, self, input_features=out_qt_flatten,
-                                           n_dim_poses=4 * self.num_classes, n_poses_init=100, horizon=100,
-                                           horizon_noise_off=100)
+            out_quaternion, _ = DSM.sample(device, self, input_features=out_qt_flatten,
+                                           n_dim_poses=4 * self.num_classes, n_poses_init=poses_target.size(0),
+                                           horizon=100, horizon_noise_off=100)
             return out_label, out_vertex, rois, out_pose, out_quaternion
 
     def weight_parameters(self):
