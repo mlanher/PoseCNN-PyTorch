@@ -310,7 +310,7 @@ class PoseCNNRotDiffusion(nn.Module):
             # TODO: Return annealed langevin dynamics history to visualize it
             out_quaternion, _ = DSM.sample(device, self, input_features=out_qt_flatten,
                                            n_dim_poses=4 * self.num_classes, n_poses_init=poses_target.size(0),
-                                           horizon=100, horizon_noise_off=100)
+                                           horizon=100, horizon_noise_off=400)
             return out_label, out_vertex, rois, out_pose, out_quaternion
 
     def weight_parameters(self):
