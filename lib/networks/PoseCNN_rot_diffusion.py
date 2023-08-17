@@ -97,6 +97,57 @@ class DSM:
         perturbed_t = tensor + z * std[..., None]
         return perturbed_t, noise_scale, z, std
 
+    @staticmethod
+    def annealed_langevin(model: nn.Module, input_features: torch.Tensor, poses_noisy: torch.Tensor, step: int,
+                          eps=1e-3,
+                          alpha=1e-4, noise_std=.5, horizon=100, noise_off=False) -> torch.Tensor:
+        """
+        Args:
+             noise_off: If true, particles directly follow gradient.
+        """
+        # This prevents a torch.cuda.OutOfMemoryError in for-loop of sample method
+        poses_target_noisy_ = poses_noisy.clone().detach()
+
+        phase = (horizon - step) / horizon + eps
+        sigma_T = DSM.marginal_prob_std_np(eps)
+        sigma_i = DSM.marginal_prob_std_np(phase)
+        ratio = sigma_i ** 2 / sigma_T ** 2
+        c_lr = 1e-2 if noise_off else alpha * ratio
+
+        noise_scale = phase * torch.ones_like(poses_target_noisy_[..., 0], device=poses_target_noisy_.device)
+
+        z_pred = model.rotation_model(input_features, poses_target_noisy_, noise_scale.unsqueeze(1))
+
+        noise = torch.zeros_like(poses_target_noisy_) if noise_off else torch.randn_like(
+            poses_target_noisy_) * noise_std
+
+        delta = -c_lr / 2 * z_pred + np.sqrt(c_lr) * noise
+        return poses_target_noisy_ + delta
+
+    @staticmethod
+    def _sample_annealed_langevin(model: nn.Module, input_features: torch.Tensor, poses_init: torch.Tensor, horizon=100,
+                                  horizon_noise_off=100):
+        poses_next = poses_init
+        hist = [poses_init.detach().clone().cpu().numpy()]
+        print("Performing {} steps of annealed langevin with noise.".format(horizon))
+        for step in range(horizon):
+            poses_next = DSM.annealed_langevin(model, input_features, poses_next, step, horizon=horizon)
+            hist.append(poses_next.detach().clone().cpu().numpy())
+
+        print("Performing {} steps of annealed langevin without noise.".format(horizon))
+        for step in range(horizon_noise_off):
+            poses_next = DSM.annealed_langevin(model, input_features, poses_next, step, horizon=horizon, noise_off=True)
+            hist.append(poses_next.detach().clone().cpu().numpy())
+        poses_last = poses_next
+
+        return poses_last, hist
+
+    @staticmethod
+    def sample(device: str, model: nn.Module, input_features: torch.Tensor, n_dim_poses: int, n_poses_init=100,
+               horizon=100, horizon_noise_off=100):
+        poses_init = torch.rand(n_poses_init, n_dim_poses, device=torch.device(device)) * 2 - 1
+        return DSM._sample_annealed_langevin(model, input_features, poses_init, horizon, horizon_noise_off)
+
 
 class RotationDiffusion(nn.Module):
     """ Diffusion model to predict rotations as quaternion. """
@@ -164,6 +215,8 @@ class PoseCNNRotDiffusion(nn.Module):
         dim_fc = 4096
         self.fc8 = fc(dim_fc, num_classes)
         self.fc9 = fc(dim_fc, 4 * num_classes, relu=False)
+
+        self.device = next(self.parameters()).device
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
@@ -245,21 +298,21 @@ class PoseCNNRotDiffusion(nn.Module):
         out_qt = out_qt_conv4 + out_qt_conv5
         out_qt_flatten = out_qt.view(out_qt.size(0), -1)
 
-        # TODO: If not in training use annealed langevin dynamics!
-
-        with torch.set_grad_enabled(True):
-            z_pred = self.rotation_model(out_qt_flatten, poses_target_noisy, noise_scale)
-            z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
-
         if self.training:
+            with torch.set_grad_enabled(True):
+                z_pred = self.rotation_model(out_qt_flatten, poses_target_noisy, noise_scale)
+                z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
+
             loss_pose = self.rot_loss(z_pred_weighted * std[..., None], z_target)
 
-        if self.training:
-            return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, \
-                bbox_pred, bbox_targets, bbox_inside_weights, loss_pose, poses_weight
-        # TODO: Implement return if not in training!
-        """else:
-            return out_label, out_vertex, rois, out_pose, out_quaternion"""
+            return out_logsoftmax, out_weight, out_vertex, out_logsoftmax_box, bbox_label_weights, bbox_pred, \
+                bbox_targets, bbox_inside_weights, loss_pose, poses_weight
+        else:
+            # TODO: Return annealed langevin dynamics history to visualize it
+            out_quaternion, _ = DSM.sample(self.device, self, input_features=out_qt_flatten,
+                                           n_dim_poses=4 * self.num_classes, n_poses_init=100, horizon=100,
+                                           horizon_noise_off=100)
+            return out_label, out_vertex, rois, out_pose, out_quaternion
 
     def weight_parameters(self):
         parameters = [param for name, param in self.named_parameters() if 'weight' in name]
