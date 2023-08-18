@@ -154,18 +154,42 @@ class RotationDiffusion(nn.Module):
     def __init__(self, num_classes):
         super(RotationDiffusion, self).__init__()
 
-        # Results RoI pooling, noisy rotation targets, noise scale
-        self.fc1 = nn.Linear(512 * 7 * 7 + num_classes * 4 + 1, 4096)
-        self.fc2 = nn.Linear(4096, 4096)
-        self.fc3 = nn.Linear(4096, 4 * num_classes)
+        # Reduce dimensionality
+        self.fc_dim_reduction = nn.Linear(512 * 7 * 7, 1024)
 
-        self.tanh = nn.Tanh()
+        self.attention = nn.Sequential(
+            nn.Linear(1024, 1024),
+            nn.Tanh(),
+            nn.Linear(1024, 1),
+            nn.Softmax(dim=1)
+        )
+
+        self.fc1 = nn.Sequential(
+            nn.Linear(1024 + 88 + 1, 512),  # 1024 from feature map, 88 from target pose, 1 from noise scale
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+
+        self.fc2 = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+
+        self.fc3 = nn.Linear(256, 4 * num_classes)
 
     def forward(self, roi_pool, noisy_poses_target, noise_scale):
-        out = torch.cat((roi_pool, noisy_poses_target, noise_scale), dim=1)
-        out = self.tanh(self.fc1(out))
-        out = self.tanh(self.fc2(out))
-        out = self.tanh(self.fc3(out))
+        roi_pool_reduced = self.fc_dim_reduction(roi_pool)
+
+        attention_weights = self.attention(roi_pool_reduced)
+        roi_pool_attention = attention_weights * roi_pool_reduced
+
+        out = torch.cat((roi_pool_attention, noisy_poses_target, noise_scale), dim=1)
+        out = self.fc1(out)
+        out = self.fc2(out)
+        out = self.fc3(out)
         return out
 
 
@@ -300,7 +324,6 @@ class PoseCNNRotDiffusion(nn.Module):
                 poses_target_noisy = poses_target_noisy.detach().requires_grad_(True)
 
                 z_pred = self.rotation_model(out_qt_flatten, poses_target_noisy, noise_scale)
-                # z_pred_weighted = nn.functional.normalize(torch.mul(z_pred, poses_weight))
 
             loss_pose = self.rot_loss(z_pred * std[..., None], z_target)
 
