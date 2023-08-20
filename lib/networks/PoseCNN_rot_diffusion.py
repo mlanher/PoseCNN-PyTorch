@@ -133,7 +133,7 @@ class DSM:
             poses_next = DSM.annealed_langevin(model, input_features, poses_next, step, horizon=horizon)
             hist.append(poses_next.detach().clone().cpu().numpy())
 
-        print("Performing {} steps of annealed langevin without noise.".format(horizon_noise_off))
+        print("Performing {} steps of annealed langevin without noise.".format(horizon))
         for step in range(horizon_noise_off):
             poses_next = DSM.annealed_langevin(model, input_features, poses_next, step, horizon=horizon, noise_off=True)
             hist.append(poses_next.detach().clone().cpu().numpy())
@@ -149,44 +149,48 @@ class DSM:
 
 
 class RotationDiffusion(nn.Module):
+    """ Diffusion model to predict rotations as quaternion. """
 
     def __init__(self, num_classes):
         super(RotationDiffusion, self).__init__()
 
-        self.fc1_dim_reduction = nn.Sequential(
-            nn.Linear(512 * 7 * 7 + 4 * num_classes + 1, 1024),
-            nn.Tanh(),
-            nn.Dropout(0.5))
-        self.fc2_dim_reduction = nn.Sequential(
-            nn.Linear(1024, 512),
-            nn.Tanh(),
-            nn.Dropout(0.5))
+        # Reduce dimensionality
+        self.fc_dim_reduction = nn.Linear(512 * 7 * 7, 1024)
 
-        self.attention = nn.Linear(512, 512)
-        self.context_vector = nn.Parameter(torch.randn(512))
-        self.softmax = nn.Softmax(dim=1)
+        self.attention = nn.Sequential(
+            nn.Linear(1024, 1024),
+            nn.Tanh(),
+            nn.Linear(1024, 1),
+            nn.Softmax(dim=1)
+        )
 
         self.fc1 = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.Tanh(),
-            nn.Dropout(0.5))
+            nn.Linear(1024 + 88 + 1, 512),  # 1024 from feature map, 88 from target pose, 1 from noise scale
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+
         self.fc2 = nn.Sequential(
-            nn.Linear(256, 4 * num_classes),
-            nn.Tanh())
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.5)
+        )
+
+        self.fc3 = nn.Linear(256, 4 * num_classes)
 
     def forward(self, roi_pool, noisy_poses_target, noise_scale):
-        combined_input = torch.cat((roi_pool, noisy_poses_target, noise_scale), dim=1)
+        roi_pool_reduced = self.fc_dim_reduction(roi_pool)
 
-        input_reduced = self.fc1_dim_reduction(combined_input)
-        input_reduced = self.fc2_dim_reduction(input_reduced)
+        attention_weights = self.attention(roi_pool_reduced)
+        roi_pool_attention = attention_weights * roi_pool_reduced
 
-        input_attention = self.attention(input_reduced)
-        attention_weights = self.softmax(input_attention * self.context_vector)
-        input_weighted_attention = torch.mul(input_reduced, attention_weights)
-
-        noise = self.fc1(input_weighted_attention)
-        noise = self.fc2(noise)
-        return noise
+        out = torch.cat((roi_pool_attention, noisy_poses_target, noise_scale), dim=1)
+        out = self.fc1(out)
+        out = self.fc2(out)
+        out = self.fc3(out)
+        return out
 
 
 class PoseCNNRotDiffusion(nn.Module):
