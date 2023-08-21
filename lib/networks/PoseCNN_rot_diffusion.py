@@ -160,7 +160,7 @@ class RotationDiffusion(nn.Module):
         self.attention = nn.Sequential(
             nn.Linear(1024, 1024),
             nn.ReLU(),
-            nn.Linear(1024, 1),
+            nn.Linear(1024, 1024),
             nn.Softmax(dim=1)
         )
 
