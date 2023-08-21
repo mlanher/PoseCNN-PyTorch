@@ -1,9 +1,7 @@
 # Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
 # This work is licensed under the NVIDIA Source Code License - Non-commercial. Full
 # text can be found in LICENSE.md
-from typing import Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -13,6 +11,8 @@ from layers.hough_voting import HoughVoting
 from layers.pose_target_layer import pose_target_layer
 from layers.roi_pooling import RoIPool
 from layers.roi_target_layer import roi_target_layer
+from networks.DSM import DSM
+from networks.RotationDiffusion import RotationDiffusion
 from torch.nn.init import kaiming_normal_
 
 __all__ = [
@@ -75,129 +75,6 @@ def fc(in_planes, out_planes, relu=True):
 
 def upsample(scale_factor):
     return nn.Upsample(scale_factor=scale_factor, mode='bilinear')
-
-
-class DSM:
-    @staticmethod
-    def marginal_prob_std(t: torch.Tensor, sigma=0.5):
-        """
-        Represents "shaped" version of standard deviation.
-        """
-        return torch.sqrt((sigma ** (2 * t) - 1.) / (2. * np.log(sigma)))
-
-    @staticmethod
-    def marginal_prob_std_np(t, sigma=0.5):
-        return np.sqrt((sigma ** (2 * t) - 1.) / (2. * np.log(sigma)))
-
-    @staticmethod
-    def perturb(tensor: torch.Tensor, eps=1e-5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        noise_scale = torch.rand_like(tensor[..., 0], device=tensor.device) * (1. - eps) + eps
-        z = torch.randn_like(tensor)
-        std = DSM.marginal_prob_std(noise_scale)
-        perturbed_t = tensor + z * std[..., None]
-        return perturbed_t, noise_scale, z, std
-
-    @staticmethod
-    def annealed_langevin(model: nn.Module, input_features: torch.Tensor, poses_noisy: torch.Tensor, step: int,
-                          eps=1e-3,
-                          alpha=1e-4, noise_std=.5, horizon=100, noise_off=False) -> torch.Tensor:
-        """
-        Args:
-             noise_off: If true, particles directly follow gradient.
-        """
-        # This prevents a torch.cuda.OutOfMemoryError in for-loop of sample method
-        poses_noisy_ = poses_noisy.clone().detach()
-
-        phase = (horizon - step) / horizon + eps
-        sigma_T = DSM.marginal_prob_std_np(eps)
-        sigma_i = DSM.marginal_prob_std_np(phase)
-        ratio = sigma_i ** 2 / sigma_T ** 2
-        c_lr = 1e-2 if noise_off else alpha * ratio
-
-        noise_scale = phase * torch.ones_like(poses_noisy_[..., 0], device=poses_noisy_.device)
-        z_pred = model.rotation_model(input_features, poses_noisy_, noise_scale.unsqueeze(1))
-
-        noise = torch.zeros_like(poses_noisy_) if noise_off else torch.randn_like(
-            poses_noisy_) * noise_std
-
-        delta = -c_lr / 2 * z_pred + np.sqrt(c_lr) * noise
-        return poses_noisy_ + delta
-
-    @staticmethod
-    def _sample_annealed_langevin(model: nn.Module, input_features: torch.Tensor, poses_init: torch.Tensor, horizon=100,
-                                  horizon_noise_off=100):
-        poses_next = poses_init
-        hist = [poses_init.detach().clone().cpu().numpy()]
-        print("Performing {} steps of annealed langevin with noise.".format(horizon))
-        for step in range(horizon):
-            poses_next = DSM.annealed_langevin(model, input_features, poses_next, step, horizon=horizon)
-            hist.append(poses_next.detach().clone().cpu().numpy())
-
-        print("Performing {} steps of annealed langevin without noise.".format(horizon))
-        for step in range(horizon_noise_off):
-            poses_next = DSM.annealed_langevin(model, input_features, poses_next, step, horizon=horizon, noise_off=True)
-            hist.append(poses_next.detach().clone().cpu().numpy())
-        poses_last = poses_next
-
-        return poses_last, hist
-
-    @staticmethod
-    def sample(device: str, model: nn.Module, input_features: torch.Tensor, n_dim_poses: int, n_poses_init=100,
-               horizon=100, horizon_noise_off=100):
-        poses_init = torch.rand(n_poses_init, n_dim_poses, device=torch.device(device)) * 2 - 1
-        return DSM._sample_annealed_langevin(model, input_features, poses_init, horizon, horizon_noise_off)
-
-
-class RotationDiffusion(nn.Module):
-    """ Diffusion model to predict rotations as quaternion. """
-
-    def __init__(self, num_classes):
-        super(RotationDiffusion, self).__init__()
-
-        # Reduce dimensionality
-        self.fc_dim_reduction = nn.Linear(512 * 7 * 7, 1024)
-
-        self.attention = nn.Sequential(
-            nn.Linear(1024, 1024),
-            nn.ReLU(),
-            nn.Linear(1024, 1024),
-            nn.Softmax(dim=1)
-        )
-
-        self.fc1 = nn.Sequential(
-            nn.Linear(1024 + 88 + 1, 512),  # 1024 from feature map, 88 from target pose, 1 from noise scale
-            nn.BatchNorm1d(512),
-            nn.Tanh(),
-            nn.Dropout(0.5)
-        )
-
-        self.fc2 = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.Tanh(),
-            nn.Dropout(0.5)
-        )
-
-        self.fc3 = nn.Linear(256, 4 * num_classes)
-
-    def adaptive_tanh(self, x: torch.Tensor, noise_scale: torch.Tensor):
-        """
-        Ensures range (-1, 1) while preserving the correlation of the added noise and the noise scale
-        """
-        return torch.tanh(x * noise_scale)
-
-    def forward(self, roi_pool, noisy_poses_target, noise_scale):
-        roi_pool_reduced = self.fc_dim_reduction(roi_pool)
-
-        attention_weights = self.attention(roi_pool_reduced)
-        roi_pool_attention = attention_weights * roi_pool_reduced
-
-        noisy_poses_ensured_range = self.adaptive_tanh(noisy_poses_target, noise_scale)
-        out = torch.cat((roi_pool_attention, noisy_poses_ensured_range, noise_scale), dim=1)
-        out = self.fc1(out)
-        out = self.fc2(out)
-        out = self.fc3(out)
-        return out
 
 
 class PoseCNNRotDiffusion(nn.Module):
