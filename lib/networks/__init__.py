@@ -3,4 +3,5 @@
 # text can be found in LICENSE.md
 
 from .PoseCNN import *
+from .DiffusionPoseCNNRotPoC import *
 from .PoseCNN_rot_diffusion import *
