@@ -165,7 +165,7 @@ if __name__ == '__main__':
 
     writer = SummaryWriter()
     # main loop
-    for epoch in range(1):# range(args.startepoch, args.epochs):
+    for epoch in range(args.startepoch, args.epochs):
         if args.solver == 'sgd':
             scheduler.step()
 

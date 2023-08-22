@@ -40,8 +40,6 @@ def train_poc(train_loader, background_loader, network, optimizer, epoch, writer
     network.train()
 
     for i, sample in enumerate(train_loader):
-        if i == 1 or epoch == 1:
-            break
         end = time.time()
 
         imgs = sample["image_color"].cuda()
