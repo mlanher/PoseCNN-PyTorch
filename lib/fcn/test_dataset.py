@@ -17,28 +17,7 @@ from transforms3d.quaternions import mat2quat, quat2mat, qmult
 from utils.se3 import *
 from utils.nms import nms
 from utils.pose_error import re, te
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def __repr__(self):
-        return '{:.3f} ({:.3f})'.format(self.val, self.avg)
-
+from average_meter import AverageMeter
 
 def test(test_loader, background_loader, network, output_dir):
 
