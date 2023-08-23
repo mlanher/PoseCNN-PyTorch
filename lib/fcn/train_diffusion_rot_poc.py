@@ -39,6 +39,7 @@ def train_diffusion_rot_poc(train_loader, background_loader, network, optimizer,
 
     network.train()
 
+    epoch_loss_pose = 0.
     for i, sample in enumerate(train_loader):
         end = time.time()
 
@@ -71,6 +72,10 @@ def train_diffusion_rot_poc(train_loader, background_loader, network, optimizer,
         loss_pose = network(imgs, poses[:, :, 2:6], bboxes)
         loss = loss_pose
 
+        epoch_loss_pose += loss_pose.item()
+
+        writer.add_scalar("Loss Pose (Sample)", loss_pose.item(), epoch * i)
+
         fname_loss = "losses.txt"
         loss_to_save = loss_pose.item()
         with open(fname_loss, "a") as f:
@@ -99,4 +104,6 @@ def train_diffusion_rot_poc(train_loader, background_loader, network, optimizer,
                 batch_time.val))
         cfg.TRAIN.ITERS += 1
 
+    epoch_loss_pose /= epoch_size
+    writer.add_scalar("Loss Pose (Epoch)", epoch_loss_pose, epoch)
     return
