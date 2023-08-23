@@ -25,7 +25,7 @@ import _init_paths
 import datasets
 import networks
 from fcn.config import cfg, cfg_from_file, get_output_dir
-from fcn.train_poc import train_poc
+from fcn.train_diffusion_rot_poc import train_poc
 from datasets.factory import get_dataset
 
 
