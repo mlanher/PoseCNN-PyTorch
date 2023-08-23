@@ -16,7 +16,7 @@ from networks.RotationDiffusion import RotationDiffusion
 from torch.nn.init import kaiming_normal_
 
 __all__ = [
-    'posecnn_rot_diffusion',
+    'diffusion_posenn_rot',
 ]
 
 vgg16 = models.vgg16(pretrained=False)
@@ -77,14 +77,14 @@ def upsample(scale_factor):
     return nn.Upsample(scale_factor=scale_factor, mode='bilinear')
 
 
-class PoseCNNRotDiffusion(nn.Module):
+class DiffusionPoseCNNRot(nn.Module):
     """
     Uses diffusion model for rotation prediction. Only works on RGB images and YCB Video dataset with config
     published on original repository.
     """
 
     def __init__(self, num_classes, num_units):
-        super(PoseCNNRotDiffusion, self).__init__()
+        super(DiffusionPoseCNNRot, self).__init__()
         self.num_classes = num_classes
 
         # conv features
@@ -229,8 +229,8 @@ class PoseCNNRotDiffusion(nn.Module):
         return list(filter(lambda p: p.requires_grad, parameters))
 
 
-def posecnn_rot_diffusion(num_classes, num_units, data=None):
-    model = PoseCNNRotDiffusion(num_classes, num_units)
+def diffusion_posenn_rot(num_classes, num_units, data=None):
+    model = DiffusionPoseCNNRot(num_classes, num_units)
 
     if data is not None:
         model_dict = model.state_dict()

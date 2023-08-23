@@ -4,4 +4,4 @@
 
 from .PoseCNN import *
 from .DiffusionPoseCNNRotPoC import *
-from .PoseCNN_rot_diffusion import *
+from .DiffusionPoseCNNRot import *
