@@ -40,18 +40,6 @@ class DiffusionPoseCNNRotPoC(nn.Module):
                 m.bias.data.zero_()
 
     def forward(self, x, poses, bboxes):
-        """
-        Forward pass expects RGB image as well as gt segmentation, bounding boxes and rotation as quaternion.
-
-        Args:
-            x: RGB images.
-            bboxes_coords: Ground truth coordinates of bounding boxes of shape (batch_size, 22, 4)
-            labels: Ground truth segmentation of shape (batch_size, img_height, img_width) for hough voting.
-            vertex_targets: For hough voting.
-            meta_data: For hough voting.
-            extents: For hough voting.
-            rotations: Ground truth rotation of shape (batch_size, num_classes * 4) as quaternion representation.
-        """
         device = next(self.parameters()).device
 
         # conv features
