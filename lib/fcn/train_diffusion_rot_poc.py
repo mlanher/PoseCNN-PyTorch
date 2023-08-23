@@ -28,7 +28,7 @@ class AverageMeter(object):
         return '{:.3f} ({:.3f})'.format(self.val, self.avg)
 
 
-def train_poc(train_loader, background_loader, network, optimizer, epoch, writer):
+def train_diffusion_rot_poc(train_loader, background_loader, network, optimizer, epoch, writer):
     batch_time = AverageMeter()
     losses = AverageMeter()
 

@@ -25,7 +25,7 @@ import _init_paths
 import datasets
 import networks
 from fcn.config import cfg, cfg_from_file, get_output_dir
-from fcn.train_diffusion_rot_poc import train_poc
+from fcn.train_diffusion_rot_poc import train_diffusion_rot_poc
 from datasets.factory import get_dataset
 
 
@@ -169,7 +169,7 @@ if __name__ == '__main__':
         if args.solver == 'sgd':
             scheduler.step()
 
-        train_poc(dataloader, background_loader, network, optimizer, epoch, writer)
+        train_diffusion_rot_poc(dataloader, background_loader, network, optimizer, epoch, writer)
 
         # save checkpoint
         if (epoch + 1) % cfg.TRAIN.SNAPSHOT_EPOCHS == 0 or epoch == args.epochs - 1:
