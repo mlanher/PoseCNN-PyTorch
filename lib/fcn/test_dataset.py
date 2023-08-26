@@ -3,24 +3,41 @@
 # text can be found in LICENSE.md
 
 import torch
-import torch.nn as nn
 import time
-import sys, os
+import os
 import numpy as np
-import cv2
 import scipy
-import matplotlib.pyplot as plt
 
 from fcn.config import cfg
 from fcn.test_common import refine_pose
-from transforms3d.quaternions import mat2quat, quat2mat, qmult
+from transforms3d.quaternions import quat2mat
 from utils.se3 import *
 from utils.nms import nms
-from utils.pose_error import re, te
-from average_meter import AverageMeter
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def __repr__(self):
+        return '{:.3f} ({:.3f})'.format(self.val, self.avg)
+
 
 def test(test_loader, background_loader, network, output_dir):
-
     batch_time = AverageMeter()
     epoch_size = len(test_loader)
     enum_background = enumerate(background_loader)
@@ -63,12 +80,13 @@ def test(test_loader, background_loader, network, output_dir):
         poses = sample['poses'].cuda()
         points = sample['points'][0, :, :, :].repeat(cfg.TRAIN.GPUNUM, 1, 1, 1).cuda()
         symmetry = sample['symmetry'][0, :].repeat(cfg.TRAIN.GPUNUM, 1).cuda()
-        
+
         # compute output
         if cfg.TRAIN.VERTEX_REG:
             if cfg.TRAIN.POSE_REG:
-                out_label, out_vertex, rois, out_pose, out_quaternion = network(inputs, labels, meta_data, extents, gt_boxes, poses, points, symmetry)
-                
+                out_label, out_vertex, rois, out_pose, out_quaternion = network(inputs, labels, meta_data, extents,
+                                                                                gt_boxes, poses, points, symmetry)
+
                 # combine poses
                 rois = rois.detach().cpu().numpy()
                 out_pose = out_pose.detach().cpu().numpy()
@@ -78,7 +96,7 @@ def test(test_loader, background_loader, network, output_dir):
                 for j in range(num):
                     cls = int(rois[j, 1])
                     if cls >= 0:
-                        qt = out_quaternion[j, 4*cls:4*cls+4]
+                        qt = out_quaternion[j, 4 * cls:4 * cls + 4]
                         qt = qt / np.linalg.norm(qt)
                         # allocentric to egocentric
                         poses[j, 4] *= poses[j, 6]
@@ -96,11 +114,13 @@ def test(test_loader, background_loader, network, output_dir):
                     im_depth = sample['im_depth'].numpy()[0]
                     depth_tensor = torch.from_numpy(im_depth).cuda().float()
                     labels_out = out_label[0]
-                    poses_refined = refine_pose(labels_out, depth_tensor, rois, poses, sample['meta_data'], test_loader.dataset)
+                    poses_refined = refine_pose(labels_out, depth_tensor, rois, poses, sample['meta_data'],
+                                                test_loader.dataset)
                 else:
                     poses_refined = []
             else:
-                out_label, out_vertex, rois, out_pose = network(inputs, labels, meta_data, extents, gt_boxes, poses, points, symmetry)
+                out_label, out_vertex, rois, out_pose = network(inputs, labels, meta_data, extents, gt_boxes, poses,
+                                                                points, symmetry)
                 rois = rois.detach().cpu().numpy()
                 out_pose = out_pose.detach().cpu().numpy()
                 poses = out_pose.copy()
@@ -119,13 +139,14 @@ def test(test_loader, background_loader, network, output_dir):
 
         if cfg.TEST.VISUALIZE:
             _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined, sample, \
-                test_loader.dataset._points_all, test_loader.dataset.classes, test_loader.dataset.class_colors)
+                      test_loader.dataset._points_all, test_loader.dataset.classes, test_loader.dataset.class_colors)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
 
         if not cfg.TEST.VISUALIZE:
-            result = {'labels': out_label[0].detach().cpu().numpy(), 'rois': rois, 'poses': poses, 'poses_refined': poses_refined}
+            result = {'labels': out_label[0].detach().cpu().numpy(), 'rois': rois, 'poses': poses,
+                      'poses_refined': poses_refined}
             if 'video_id' in sample and 'image_id' in sample:
                 filename = os.path.join(output_dir, sample['video_id'][0] + '_' + sample['image_id'][0] + '.mat')
             else:
@@ -143,7 +164,6 @@ def test(test_loader, background_loader, network, output_dir):
 
 
 def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined, sample, points, classes, class_colors):
-
     """Visualize a mini-batch for debugging."""
     import matplotlib.pyplot as plt
 
@@ -153,7 +173,7 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
     gt_poses = sample['poses'].numpy()
     meta_data_blob = sample['meta_data'].numpy()
     metadata = meta_data_blob[0, :]
-    intrinsic_matrix = metadata[:9].reshape((3,3))
+    intrinsic_matrix = metadata[:9].reshape((3, 3))
     gt_boxes = sample['gt_boxes'].numpy()
     extents = sample['extents'][0, :, :].numpy()
 
@@ -188,7 +208,7 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
             x2 = boxes[j, 2]
             y2 = boxes[j, 3]
             plt.gca().add_patch(
-                plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, edgecolor='g', linewidth=3))
+                plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='g', linewidth=3))
 
         # show gt label
         label_gt = label_blob[i, :, :, :]
@@ -204,7 +224,7 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
         ax = fig.add_subplot(m, n, start)
         start += 1
         plt.imshow(im_label_gt)
-        ax.set_title('gt labels') 
+        ax.set_title('gt labels')
 
         # show predicted label
         label = label_pred[i, :, :]
@@ -237,7 +257,8 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
                 x2 = rois[j, 4]
                 y2 = rois[j, 5]
                 plt.gca().add_patch(
-                    plt.Rectangle((x1, y1), x2-x1, y2-y1, fill=False, edgecolor=np.array(class_colors[int(cls)])/255.0, linewidth=3))
+                    plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False,
+                                  edgecolor=np.array(class_colors[int(cls)]) / 255.0, linewidth=3))
 
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
@@ -257,10 +278,10 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
                 cls = int(pose_blob[j, 1])
                 # extract 3D points
                 x3d = np.ones((4, points.shape[1]), dtype=np.float32)
-                x3d[0, :] = points[cls,:,0]
-                x3d[1, :] = points[cls,:,1]
-                x3d[2, :] = points[cls,:,2]
-               
+                x3d[0, :] = points[cls, :, 0]
+                x3d[1, :] = points[cls, :, 1]
+                x3d[2, :] = points[cls, :, 2]
+
                 # projection
                 RT = np.zeros((3, 4), dtype=np.float32)
                 qt = pose_blob[j, 2:6]
@@ -271,9 +292,9 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
                 x2d = np.matmul(intrinsic_matrix, np.matmul(RT, x3d))
                 x2d[0, :] = np.divide(x2d[0, :], x2d[2, :])
                 x2d[1, :] = np.divide(x2d[1, :], x2d[2, :])
-                plt.plot(x2d[0, :], x2d[1, :], '.', color=np.divide(class_colors[cls], 255.0), alpha=0.1)                    
+                plt.plot(x2d[0, :], x2d[1, :], '.', color=np.divide(class_colors[cls], 255.0), alpha=0.1)
 
-            # show predicted poses
+                # show predicted poses
             ax = fig.add_subplot(m, n, start)
             start += 1
             ax.set_title('predicted poses')
@@ -287,9 +308,9 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
                 if rois[j, -1] > cfg.TEST.DET_THRESHOLD:
                     # extract 3D points
                     x3d = np.ones((4, points.shape[1]), dtype=np.float32)
-                    x3d[0, :] = points[cls,:,0]
-                    x3d[1, :] = points[cls,:,1]
-                    x3d[2, :] = points[cls,:,2]
+                    x3d[0, :] = points[cls, :, 0]
+                    x3d[1, :] = points[cls, :, 1]
+                    x3d[2, :] = points[cls, :, 2]
 
                     # projection
                     RT = np.zeros((3, 4), dtype=np.float32)
@@ -313,9 +334,9 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
                     if rois[j, -1] > cfg.TEST.DET_THRESHOLD:
                         # extract 3D points
                         x3d = np.ones((4, points.shape[1]), dtype=np.float32)
-                        x3d[0, :] = points[cls,:,0]
-                        x3d[1, :] = points[cls,:,1]
-                        x3d[2, :] = points[cls,:,2]
+                        x3d[0, :] = points[cls, :, 0]
+                        x3d[1, :] = points[cls, :, 1]
+                        x3d[2, :] = points[cls, :, 2]
 
                         # projection
                         RT = np.zeros((3, 4), dtype=np.float32)
@@ -333,21 +354,21 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
             for j in range(1, num_classes):
                 index = np.where(label_gt[:, :, j] > 0)
                 if len(index[0]) > 0:
-                    center[:, index[0], index[1]] = vertex_target[3*j:3*j+3, index[0], index[1]]
+                    center[:, index[0], index[1]] = vertex_target[3 * j:3 * j + 3, index[0], index[1]]
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[0,:,:])
-            ax.set_title('gt center x') 
+            plt.imshow(center[0, :, :])
+            ax.set_title('gt center x')
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[1,:,:])
+            plt.imshow(center[1, :, :])
             ax.set_title('gt center y')
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(np.exp(center[2,:,:]))
+            plt.imshow(np.exp(center[2, :, :]))
             ax.set_title('gt z')
 
             # show predicted vertex targets
@@ -357,21 +378,21 @@ def _vis_test(inputs, labels, out_label, out_vertex, rois, poses, poses_refined,
             for j in range(1, num_classes):
                 index = np.where(label == j)
                 if len(index[0]) > 0:
-                    center[:, index[0], index[1]] = vertex_target[3*j:3*j+3, index[0], index[1]]
+                    center[:, index[0], index[1]] = vertex_target[3 * j:3 * j + 3, index[0], index[1]]
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[0,:,:])
-            ax.set_title('predicted center x') 
+            plt.imshow(center[0, :, :])
+            ax.set_title('predicted center x')
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(center[1,:,:])
+            plt.imshow(center[1, :, :])
             ax.set_title('predicted center y')
 
             ax = fig.add_subplot(m, n, start)
             start += 1
-            plt.imshow(np.exp(center[2,:,:]))
+            plt.imshow(np.exp(center[2, :, :]))
             ax.set_title('predicted z')
 
         plt.show()
