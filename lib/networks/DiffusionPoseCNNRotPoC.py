@@ -113,8 +113,6 @@ class DiffusionPoseCNNRotPoC(nn.Module):
                     poses_target[idx, label_idx:label_idx + poses_dim] = poses_flatten[idx]
 
             z_pred = self.rotation_model(out_roi_flatten, poses_target, noise_scale.unsqueeze(1))
-            print(z.size())
-            print(z_pred.size())
 
             return self.rot_loss(z_pred * std[..., None], z)
 
