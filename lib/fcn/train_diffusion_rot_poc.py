@@ -69,7 +69,7 @@ def train_diffusion_rot_poc(train_loader, background_loader, network, optimizer,
                 imgs[j] = masks[j] * imgs[j] + (1 - masks[j]) * background_color[j]
 
         # Only give rotations
-        loss_pose = network(imgs, poses[:, :, 2:6], bboxes)
+        loss_pose = network(imgs, poses[:, :, 2:9], bboxes)
         loss = loss_pose
 
         epoch_loss_pose += loss_pose.item()

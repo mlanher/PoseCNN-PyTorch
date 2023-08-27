@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn.init import kaiming_normal_
 from networks.RotationDiffusion import RotationDiffusion
 from networks.DSM import DSM
+from networks.SO3_R3 import SO3_R3
 from torchvision.ops import roi_pool
 
 vgg16 = models.vgg16(pretrained=False)
@@ -39,6 +40,20 @@ class DiffusionPoseCNNRotPoC(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
+    def quaternion_to_matrix(self, q: torch.Tensor):
+        batch_size = q.size(0)
+        R = torch.zeros(batch_size, 3, 3, device=q.device)
+        R[:, 0, 0] = 1 - 2 * q[:, 2] ** 2 - 2 * q[:, 3] ** 2
+        R[:, 0, 1] = 2 * q[:, 1] * q[:, 2] - 2 * q[:, 3] * q[:, 0]
+        R[:, 0, 2] = 2 * q[:, 1] * q[:, 3] + 2 * q[:, 2] * q[:, 0]
+        R[:, 1, 0] = 2 * q[:, 1] * q[:, 2] + 2 * q[:, 3] * q[:, 0]
+        R[:, 1, 1] = 1 - 2 * q[:, 1] ** 2 - 2 * q[:, 3] ** 2
+        R[:, 1, 2] = 2 * q[:, 2] * q[:, 3] - 2 * q[:, 1] * q[:, 0]
+        R[:, 2, 0] = 2 * q[:, 1] * q[:, 3] - 2 * q[:, 2] * q[:, 0]
+        R[:, 2, 1] = 2 * q[:, 2] * q[:, 3] + 2 * q[:, 1] * q[:, 0]
+        R[:, 2, 2] = 1 - 2 * q[:, 1] ** 2 - 2 * q[:, 2] ** 2
+        return R
+
     def forward(self, x, poses, bboxes):
         device = next(self.parameters()).device
 
@@ -50,22 +65,12 @@ class DiffusionPoseCNNRotPoC(nn.Module):
             if i == 29:
                 out_conv5_3 = x
 
+        # Extract target poses
         bboxes_coords, bboxes_labels = bboxes[:, :, :-1], bboxes[:, :, -1]
         batch_size, num_classes, poses_dim = poses.size()
 
-        poses_target = torch.zeros(batch_size * num_classes, poses_dim * num_classes, device=poses.device)
-
-        bboxes_labels_flatten = bboxes_labels.view(-1)
-        poses_flatten = poses.view(batch_size * num_classes, -1)
-
-        mask = bboxes_labels_flatten > 0
-        label_indices = ((bboxes_labels_flatten[mask] - 1) * poses_dim).long()
-        indices = (torch.arange(batch_size, device=poses.device).unsqueeze(1) * num_classes) + \
-                  torch.arange(num_classes, device=poses.device)
-        for idx, label_idx in zip(indices.view(-1)[mask], label_indices):
-            poses_target[idx, label_idx:label_idx + poses_dim] = poses_flatten[idx]
-
         # Ensure RoI pooling format
+        # TODO: RoIs should contain object
         batch_indices = torch.arange(bboxes_coords.size(0)).view(-1, 1, 1).expand(-1, bboxes_coords.size(1), -1).cuda()
         rois = torch.cat([batch_indices.reshape(-1, 1), bboxes_coords.reshape(-1, 4)], dim=1)
 
@@ -74,15 +79,44 @@ class DiffusionPoseCNNRotPoC(nn.Module):
         out_roi = out_roi_conv4 + out_roi_conv5
         out_roi_flatten = out_roi.view(out_roi.size(0), -1)
 
-        # TODO: Inference
+        # TODO: Implement inference (annealed langevin dynamics in SE(3)
         if self.training:
-            with torch.set_grad_enabled(True):
-                poses_target_noisy, noise_scale, z_target, std = DSM.perturb(poses_target)
-                noise_scale = noise_scale.unsqueeze(1)
-                rot_target_noisy = poses_target_noisy.detach().requires_grad_(True)
-        z_pred = self.rotation_model(out_roi_flatten, rot_target_noisy, noise_scale)
+            batch_size = poses.size(0)
+            poses_no_batch_dim = poses.reshape(batch_size * poses.size(1), poses.size(2))
+            quat = poses_no_batch_dim[:, :4]
+            R = self.quaternion_to_matrix(quat)
+            t = poses_no_batch_dim[:, 4:]
+            H = SO3_R3(R=R, t=t)
 
-        return self.rot_loss(z_pred * std[..., None], z_target)
+            tw_noisy, noise_scale, z, std = DSM.perturb_in_vector_space(H)
+            tw_noisy = tw_noisy.detach()
+            tw_noisy.requires_grad_(True)
+
+            with torch.set_grad_enabled(True):
+                H_noisy = SO3_R3().exp_map(tw_noisy)
+                quat_noisy = H_noisy.to_quaternion(pos_scalar_only=True)
+                t_noisy = H_noisy.t
+
+                poses_noisy_no_batch_dim = torch.cat((quat_noisy, t_noisy), dim=1)
+                poses_noisy = poses_noisy_no_batch_dim.reshape(batch_size, poses.size(1), poses.size(2))
+
+                poses_target = torch.zeros(batch_size * num_classes, poses_dim * num_classes, device=poses.device)
+
+                bboxes_labels_flatten = bboxes_labels.view(-1)
+                poses_flatten = poses_noisy.view(batch_size * num_classes, -1)
+
+                mask = bboxes_labels_flatten > 0
+                label_indices = ((bboxes_labels_flatten[mask] - 1) * poses_dim).long()
+                indices = (torch.arange(batch_size, device=poses.device).unsqueeze(1) * num_classes) + \
+                          torch.arange(num_classes, device=poses.device)
+                for idx, label_idx in zip(indices.view(-1)[mask], label_indices):
+                    poses_target[idx, label_idx:label_idx + poses_dim] = poses_flatten[idx]
+
+            z_pred = self.rotation_model(out_roi_flatten, poses_target, noise_scale.unsqueeze(1))
+            print(z.size())
+            print(z_pred.size())
+
+            return self.rot_loss(z_pred * std[..., None], z)
 
     def weight_parameters(self):
         parameters = [param for name, param in self.named_parameters() if 'weight' in name]
